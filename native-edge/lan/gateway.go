@@ -39,15 +39,18 @@ type Device struct {
 // Config are the gateway parameters (client_tunnel_ip etc. in Python).
 type Config struct {
 	// Leases persists the DHCP lease table across restarts (nil: memory only).
-	Leases       *LeaseTable
-	Device       Device
-	ClientIP     netip.Addr
-	GatewayIP    netip.Addr // zero: network address + 1
-	TunnelMTU    int
-	LeaseSeconds int
-	StaleAfter   time.Duration
-	Now          func() time.Time
-	OnPacket     func([]byte)
+	Leases            *LeaseTable
+	Device            Device
+	ClientIP          netip.Addr
+	GatewayIP         netip.Addr // zero: network address + 1
+	TunnelMTU         int
+	LeaseSeconds      int
+	StaleAfter        time.Duration
+	Now               func() time.Time
+	OnPacket          func([]byte)
+	AuthorizeOutbound func(device, destination netip.Addr, protocol uint8, destinationPort uint16) bool
+	PortalURL         string
+	OnLeaseChange     func(device netip.Addr, active bool)
 }
 
 // Counters mirror the Python counter names.
@@ -55,6 +58,7 @@ type Counters struct {
 	BytesToTunnel, BytesFromTunnel, FramesIn, FramesOut, PacketsToTunnel, PacketsFromTunnel, DHCPOffers, DHCPAcks, DHCPNaks, DHCPReleases uint64
 	ARPReplies, ForeignMACDropped, SpoofedSourceDropped, LocalOnlyDropped, TTLExpired, Fragmented                                         uint64
 	FragNeededSent, WrongDestination, NoDeviceMAC, Malformed, WriteErrors                                                                 uint64
+	AuthorizationDropped                                                                                                                  uint64
 }
 
 // Gateway serves one device on one adapter. Methods are safe for concurrent
@@ -63,24 +67,24 @@ type Gateway struct {
 	// Timing of tunnel-to-device delivery: time waiting for mu and time inside the
 	// adapter write, worst case in ns and counts over 10 ms (see Timing).
 	delivLockMax, delivWriteMax, delivLockOver10, delivWriteOver10 atomic.Int64
-	mu        sync.Mutex
-	cfg       Config
-	io        IO
-	mac       [6]byte
-	prefix    netip.Prefix
-	gateway   [4]byte
-	device    [4]byte
-	deviceMAC *[6]byte
-	lastSeen  time.Time
-	hasSeen   bool
-	hinted    bool // deviceMAC came from the lease table and has not spoken yet
-	leaseEnd  time.Time
-	saved     Lease
-	mssLimit  int
-	ident     uint16
-	Leased    bool
-	c         Counters
-	probe     probeState
+	mu                                                             sync.Mutex
+	cfg                                                            Config
+	io                                                             IO
+	mac                                                            [6]byte
+	prefix                                                         netip.Prefix
+	gateway                                                        [4]byte
+	device                                                         [4]byte
+	deviceMAC                                                      *[6]byte
+	lastSeen                                                       time.Time
+	hasSeen                                                        bool
+	hinted                                                         bool // deviceMAC came from the lease table and has not spoken yet
+	leaseEnd                                                       time.Time
+	saved                                                          Lease
+	mssLimit                                                       int
+	ident                                                          uint16
+	Leased                                                         bool
+	c                                                              Counters
+	probe                                                          probeState
 }
 
 func subnetOf(ip netip.Addr) netip.Prefix { p, _ := ip.Prefix(24); return p }
@@ -229,8 +233,12 @@ func (g *Gateway) mayClaim(src [6]byte) bool {
 }
 
 func (g *Gateway) touch(src [6]byte) {
+	changed := g.deviceMAC != nil && *g.deviceMAC != src
 	m := src
 	g.deviceMAC, g.lastSeen, g.hasSeen = &m, g.cfg.Now(), true
+	if changed && g.cfg.OnLeaseChange != nil {
+		g.cfg.OnLeaseChange(netip.AddrFrom4(g.device), false)
+	}
 	if g.hinted {
 		g.hinted = false
 	}
@@ -369,6 +377,20 @@ func (g *Gateway) ipv4(srcMAC [6]byte, packet []byte) {
 		g.c.LocalOnlyDropped++
 		return
 	}
+	if g.cfg.AuthorizeOutbound != nil {
+		if !g.Leased || (!g.leaseEnd.IsZero() && !g.cfg.Now().Before(g.leaseEnd)) {
+			g.c.AuthorizationDropped++
+			return
+		}
+		var dstPort uint16
+		if (protocol == 6 || protocol == 17) && total >= header+4 {
+			dstPort = binary.BigEndian.Uint16(packet[header+2 : header+4])
+		}
+		if !g.cfg.AuthorizeOutbound(netip.AddrFrom4(src), d, protocol, dstPort) {
+			g.c.AuthorizationDropped++
+			return
+		}
+	}
 	fwd := decrementTTL(packet)
 	if fwd == nil {
 		g.c.TTLExpired++
@@ -428,6 +450,9 @@ func (g *Gateway) dhcp(srcMAC [6]byte, p []byte) {
 		if g.deviceMAC != nil && srcMAC == *g.deviceMAC && bytes.Equal(p[12:16], g.device[:]) {
 			g.Leased, g.leaseEnd = false, time.Time{}
 			g.persist(0)
+			if g.cfg.OnLeaseChange != nil {
+				g.cfg.OnLeaseChange(netip.AddrFrom4(g.device), false)
+			}
 			g.c.DHCPReleases++
 		}
 		return
@@ -459,10 +484,14 @@ func (g *Gateway) dhcp(srcMAC [6]byte, p []byte) {
 		requested = p[12:16]
 	}
 	if bytes.Equal(requested, g.device[:]) {
+		wasLeased := g.Leased && (g.leaseEnd.IsZero() || g.cfg.Now().Before(g.leaseEnd))
 		g.dhcpReply(5, xid, flags, chaddr, g.device)
 		g.c.DHCPAcks++
 		g.Leased = true
 		g.leaseEnd = g.cfg.Now().Add(time.Duration(g.cfg.LeaseSeconds) * time.Second)
+		if !wasLeased && g.cfg.OnLeaseChange != nil {
+			g.cfg.OnLeaseChange(netip.AddrFrom4(g.device), false)
+		}
 		g.persist(g.cfg.Now().Unix())
 	} else {
 		g.dhcpReply(6, xid, flags, chaddr, [4]byte{})
@@ -504,6 +533,10 @@ func (g *Gateway) dhcpReply(message byte, xid, flags []byte, chaddr [6]byte, yia
 		bc := g.prefix.Addr().As4()
 		bc[3] = 255
 		opt = append(append(opt, 28, 4), bc[:]...)
+		if g.cfg.PortalURL != "" && len(g.cfg.PortalURL) <= 255 {
+			opt = append(opt, 114, byte(len(g.cfg.PortalURL)))
+			opt = append(opt, g.cfg.PortalURL...)
+		}
 	}
 	opt = append(opt, 255)
 	udp := buildUDP(g.gateway, [4]byte{255, 255, 255, 255}, 67, 68, append(body, opt...))

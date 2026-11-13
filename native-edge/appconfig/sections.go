@@ -1,10 +1,13 @@
 package appconfig
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
 	"strconv"
 	"strings"
+
+	"gamebond.local/nativeedge/hotspot"
 )
 
 // allowed reports an error when m holds a key outside names (**kwargs TypeError).
@@ -315,6 +318,24 @@ func checkLinkPolicy(m map[string]any) error {
 // checkSections runs the QoS, outer, relay and link-policy checks in
 // load_config order.
 func checkSections(config map[string]any, role string) error {
+	if raw, ok := config["hotspot"]; ok && raw != nil {
+		if role != "client" {
+			return bad("hotspot belongs to the client configuration")
+		}
+		b, err := json.Marshal(raw)
+		if err != nil {
+			return bad("invalid hotspot configuration")
+		}
+		var cfg hotspot.Config
+		decoder := json.NewDecoder(bytes.NewReader(b))
+		decoder.DisallowUnknownFields()
+		if err = decoder.Decode(&cfg); err != nil {
+			return bad("invalid hotspot configuration: %v", err)
+		}
+		if err = cfg.Validate(); err != nil {
+			return err
+		}
+	}
 	if v, ok := config["adaptive_qos"]; ok {
 		m, isMap := v.(map[string]any)
 		if !isMap {
@@ -366,6 +387,42 @@ func checkSections(config map[string]any, role string) error {
 			if err := checkLinkPolicy(pm); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+func hotspotDevices(config map[string]any) error {
+	raw, ok := config["hotspot"]
+	if !ok || raw == nil {
+		return nil
+	}
+	h, ok := raw.(map[string]any)
+	if !ok {
+		return bad("hotspot must be an object")
+	}
+	enabled, _ := h["enabled"].(bool)
+	if !enabled {
+		return nil
+	}
+	want, ok := h["devices"].([]any)
+	if !ok {
+		return bad("hotspot devices must be a list")
+	}
+	configured := map[string]bool{}
+	if devices, ok := config["lan_devices"].([]any); ok {
+		for _, rawDevice := range devices {
+			if device, ok := rawDevice.(map[string]any); ok {
+				if name, ok := device["name"].(string); ok {
+					configured[name] = true
+				}
+			}
+		}
+	}
+	for _, entry := range want {
+		name, ok := entry.(string)
+		if !ok || !configured[name] {
+			return bad("hotspot device %v must name a configured lan_devices entry", entry)
 		}
 	}
 	return nil

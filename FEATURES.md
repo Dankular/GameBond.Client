@@ -96,6 +96,14 @@ These features target a separately supervised Linux gateway control plane. The c
 - Multicast & Broadcast Rate Limiting.
 - Port Mirroring.
 
+## Captive hotspot portal
+
+- Opt-in IPv4 guest access gate on selected LAN-device adapters, with an HTTPS branded landing page and DHCP captive-portal URI (RFC 8910).
+- Voucher and shared-password authentication with expiring sessions; vouchers can be issued and revoked in the dashboard.
+- External portal callback integration and a provider-neutral checkout/webhook contract.
+- Guest-to-guest, private-subnet, host and management traffic is blocked; active sessions can be revoked in the dashboard.
+- Setup, secret file references, callback contracts and current network limits: [captive-hotspot.md](docs/captive-hotspot.md).
+
 
 ## Where the code lives
 

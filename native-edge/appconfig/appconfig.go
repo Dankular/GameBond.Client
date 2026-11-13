@@ -388,6 +388,9 @@ func Validate(config map[string]any, opt Options) (*Result, error) {
 	if err := lanDevices(config, role, clientIP); err != nil {
 		return nil, err
 	}
+	if err := hotspotDevices(config); err != nil {
+		return nil, err
+	}
 	if err := localNetworks(config, role, clientIP); err != nil {
 		return nil, err
 	}

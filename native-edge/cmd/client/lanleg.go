@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gamebond.local/nativeedge/devusage"
+	"gamebond.local/nativeedge/hotspot"
 	"gamebond.local/nativeedge/lan"
 )
 
@@ -45,7 +46,15 @@ type lanManager struct {
 	usageSave time.Time
 
 	// leases is the DHCP lease table that survives restarts (nil: memory only).
-	leases *lan.LeaseTable
+	leases    *lan.LeaseTable
+	hotspot   *hotspot.Manager
+	portalURL string
+}
+
+func (m *lanManager) useHotspot(policy *hotspot.Manager, portalURL string) {
+	if m != nil {
+		m.hotspot, m.portalURL = policy, portalURL
+	}
 }
 
 // lanStallReopen is how long an adapter may deliver no frames before it is reopened.
@@ -234,13 +243,35 @@ func (m *lanManager) start(ctx context.Context, d lan.DeviceConfig) (*runningGat
 		}
 		dev.PinnedMAC = &mac
 	}
-	gw, err := lan.NewGateway(lan.Config{Device: dev, Leases: m.leases, ClientIP: m.client, TunnelMTU: m.mtu, OnPacket: func(p []byte) {
-		m.usage.Record(d.TunnelIP.As4(), true, p)
-		if d.UDPDirect && m.direct != nil && m.direct.Handle(p) {
-			return
+	portalURL := ""
+	var authorize func(netip.Addr, netip.Addr, uint8, uint16) bool
+	var leaseChanged func(netip.Addr, bool)
+	if m.hotspot != nil && m.hotspot.IsGuest(d.Name) {
+		portalURL = m.portalURL
+		authorize = func(src, dst netip.Addr, protocol uint8, port uint16) bool {
+			if protocol == 17 && port == 53 {
+				for _, dns := range d.DNS {
+					if dns == dst {
+						return true
+					}
+				}
+			}
+			return m.hotspot.AllowsDestination(src, dst, protocol, port, time.Now())
 		}
-		m.outbound(p)
-	}}, io)
+		leaseChanged = func(ip netip.Addr, active bool) {
+			if !active {
+				m.hotspot.Revoke(ip)
+			}
+		}
+	}
+	gw, err := lan.NewGateway(lan.Config{Device: dev, Leases: m.leases, ClientIP: m.client, TunnelMTU: m.mtu, PortalURL: portalURL,
+		AuthorizeOutbound: authorize, OnLeaseChange: leaseChanged, OnPacket: func(p []byte) {
+			m.usage.Record(d.TunnelIP.As4(), true, p)
+			if d.UDPDirect && m.direct != nil && m.direct.Handle(p) {
+				return
+			}
+			m.outbound(p)
+		}}, io)
 	if err != nil {
 		io.Close()
 		return nil, err
@@ -316,8 +347,9 @@ func (m *lanManager) status() any {
 		c := rg.gw.Stats()
 		row := map[string]any{"name": d.Name, "tunnel_ip": d.TunnelIP.String(), "adapter_mac": rg.mac, "leased": rg.gw.IsLeased(), "present": rg.gw.Present(), "silent_s": rg.gw.SilentFor().Seconds(), "up": rg.alive(), "error": nil,
 			"frames_in": c.FramesIn, "frames_out": c.FramesOut, "packets_to_tunnel": c.PacketsToTunnel, "packets_from_tunnel": c.PacketsFromTunnel, "bytes_to_tunnel": c.BytesToTunnel, "bytes_from_tunnel": c.BytesFromTunnel,
-			"dhcp_offers": c.DHCPOffers, "dhcp_acks": c.DHCPAcks,
-			"udp_direct": m.directStatus(d), "oversize_fragmented": c.Fragmented, "oversize_df_dropped": c.FragNeededSent, "tunnel_to_device_malformed": c.Malformed, "delivery_timing": rg.gw.DeliveryTiming()}
+			"dhcp_offers": c.DHCPOffers, "dhcp_acks": c.DHCPAcks, "authorization_dropped": c.AuthorizationDropped,
+			"hotspot_guest": m.hotspot != nil && m.hotspot.IsGuest(d.Name),
+			"udp_direct":    m.directStatus(d), "oversize_fragmented": c.Fragmented, "oversize_df_dropped": c.FragNeededSent, "tunnel_to_device_malformed": c.Malformed, "delivery_timing": rg.gw.DeliveryTiming()}
 		if mac, ok := rg.gw.DeviceMAC(); ok {
 			row["device_mac"] = fmtMAC(mac)
 		} else {

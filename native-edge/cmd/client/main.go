@@ -30,6 +30,7 @@ import (
 	"gamebond.local/nativeedge/carrier"
 	"gamebond.local/nativeedge/client"
 	"gamebond.local/nativeedge/errhist"
+	"gamebond.local/nativeedge/hotspot"
 	"gamebond.local/nativeedge/lan"
 	"gamebond.local/nativeedge/linkpolicy"
 	"gamebond.local/nativeedge/omr"
@@ -71,6 +72,7 @@ type fileConfig struct {
 	AdaptiveQoS    json.RawMessage              `json:"adaptive_qos"`
 	ClientTunnelIP string                       `json:"client_tunnel_ip"`
 	LANDevices     json.RawMessage              `json:"lan_devices"`
+	Hotspot        json.RawMessage              `json:"hotspot"`
 	LocalNetworks  json.RawMessage              `json:"local_networks"`
 	StaticRoutes   json.RawMessage              `json:"static_routes"`
 	OuterTransport json.RawMessage              `json:"outer_transport"` // stream-carrier fallback; null/absent = UDP only
@@ -363,6 +365,41 @@ func session(parent context.Context, ready func(), logOut, relayOnly io.Writer) 
 		return err
 	}
 	var lanMgr *lanManager
+	var hotspotMgr *hotspot.Manager
+	portalURL := ""
+	if len(cfg.Hotspot) > 0 && string(cfg.Hotspot) != "null" {
+		var hc hotspot.Config
+		if err = json.Unmarshal(cfg.Hotspot, &hc); err != nil {
+			return fmt.Errorf("hotspot config: %w", err)
+		}
+		if err = hotspot.ResolveSecretReferences(&hc, filepath.Dir(*configPath)); err != nil {
+			return err
+		}
+		if hc.Enabled {
+			if hotspotMgr, err = hotspot.New(hc); err != nil {
+				return err
+			}
+			if *statusPath != "" {
+				if err = hotspotMgr.SetStatePath(filepath.Join(filepath.Dir(*statusPath), "hotspot-state.json")); err != nil {
+					return err
+				}
+				hotspotMgr.WatchRevocations(ctx, filepath.Join(filepath.Dir(*statusPath), "hotspot-control.json"))
+			}
+			portal, perr := hotspotMgr.StartPortal()
+			if perr != nil {
+				return perr
+			}
+			defer portal.Close()
+			host := hc.Hostname
+			if _, _, splitErr := net.SplitHostPort(hc.Listen); splitErr == nil {
+				_, port, _ := net.SplitHostPort(hc.Listen)
+				if port != "443" {
+					host = net.JoinHostPort(host, port)
+				}
+			}
+			portalURL = "https://" + host + "/"
+		}
+	}
 	if len(cfg.LANDevices) > 0 && string(cfg.LANDevices) != "null" && string(cfg.LANDevices) != "[]" {
 		clientIP, perr := netip.ParseAddr(cfg.ClientTunnelIP)
 		if perr != nil {
@@ -371,11 +408,23 @@ func session(parent context.Context, ready func(), logOut, relayOnly io.Writer) 
 		if lanMgr, err = newLanManager(cfg.LANDevices, clientIP, cfg.InterfaceIDs, cfg.InterfaceIndex, cfg.MTU); err != nil {
 			return err
 		}
+		if hotspotMgr != nil {
+			names := make([]string, 0, len(lanMgr.devices))
+			for _, d := range lanMgr.devices {
+				names = append(names, d.Name)
+			}
+			if err = hotspotMgr.ValidateDevices(names); err != nil {
+				return err
+			}
+		}
 		lanMgr.outbound = bridge.Send
 		if *statusPath != "" {
 			lanMgr.useLeaseTable(filepath.Join(filepath.Dir(*statusPath), "lan-leases.json"))
 			lanMgr.useAccess(filepath.Dir(*statusPath))
 			lanMgr.useUsageStore(filepath.Dir(*statusPath))
+		}
+		if hotspotMgr != nil {
+			lanMgr.useHotspot(hotspotMgr, portalURL)
 		}
 		for _, d := range lanMgr.devices {
 			if d.UDPDirect && len(specs) > 0 {
@@ -387,6 +436,9 @@ func session(parent context.Context, ready func(), logOut, relayOnly io.Writer) 
 		classifier.SetPriorityHosts(lanMgr.deviceIPs())
 		lanMgr.out = func(m map[string]any) { b, _ := json.Marshal(m); fmt.Println(string(b)) }
 		defer lanMgr.close()
+	}
+	if hotspotMgr != nil && lanMgr == nil {
+		return fmt.Errorf("hotspot requires configured guest lan_devices")
 	}
 	var localMgr *localNetworkManager
 	if len(cfg.LocalNetworks) > 0 || len(cfg.StaticRoutes) > 0 {
@@ -788,6 +840,9 @@ func statusDocument(cfg fileConfig, peer netip.AddrPort, created time.Time, s cl
 		"runtime":   runtimeStats(), "stack_write": b.Out.Timing(),
 		"packets": map[string]any{"outbound": b.Outbound.Load(), "injected": b.Injected.Load(), "dropped": b.Dropped.Load(), "malformed": b.Malformed.Load()},
 		"dish":    dishStatusDoc(), "qos": s.QoS, "link_usage": map[string]any{}, "omr": o.status(), "lan_devices": l.status(), "local_networks": localMgr.status(), "device_usage": l.usageStatus(), "lan_access": l.accessStatus(), "alarms": alarms, "loss_causes": lossCauses(s), "exit": exitStatusDoc(s.Exit)}
+	if l != nil && l.hotspot != nil {
+		doc["hotspot"] = l.hotspot.Status(time.Now())
+	}
 	if capture != nil {
 		capture.status(doc)
 	}
