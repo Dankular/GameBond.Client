@@ -110,6 +110,9 @@ func (b *L2Bridge) FromAdapter(frame []byte) {
 	}
 }
 
+// minWireFrame is the size frames are padded to before they reach the adapter.
+const minWireFrame = 120
+
 // Deliver handles an L2 payload that arrived over the bond and reports whether it was an L2
 // payload (so the caller never hands it to the IP stack, delivered or not).
 func (b *L2Bridge) Deliver(payload []byte) bool {
@@ -126,7 +129,13 @@ func (b *L2Bridge) Deliver(payload []byte) bool {
 		if out != L2PortLAN {
 			continue
 		}
-		if err := b.io.Write(frame); err != nil {
+		// A NIC pads runt frames in hardware; the raw driver write does not, and devices never saw
+		// the 42-byte ARP replies. Pad here, at the adapter, so the exit stays a pure stack.
+		wire := frame
+		if len(wire) < minWireFrame {
+			wire = append(append(make([]byte, 0, minWireFrame), wire...), make([]byte, minWireFrame-len(wire))...)
+		}
+		if err := b.io.Write(wire); err != nil {
 			b.writeErr.Add(1)
 			continue
 		}

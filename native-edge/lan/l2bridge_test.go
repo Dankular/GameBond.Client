@@ -37,12 +37,17 @@ func TestL2BridgeCarriesDeviceFramesIntoTheBondAndBack(t *testing.T) {
 	if p := (*queued)[0].Payload; p[0] != bond.L2Marker || !bytes.Equal(p[1:], arp) {
 		t.Fatal("payload is not the wrapped frame")
 	}
-	reply := l2frame(0x10, 0x20, 0x88b5, 100)
+	reply := l2frame(0x10, 0x20, 0x88b5, 200)
 	if !b.Deliver(bond.WrapFrame(reply)) {
 		t.Fatal("L2 payload not recognised")
 	}
 	if got, _ := peer.Read(50 * time.Millisecond); !bytes.Equal(got, reply) {
 		t.Fatal("device did not receive the frame")
+	}
+	runt := l2frame(0x10, 0x20, 0x0806, 28)
+	b.Deliver(bond.WrapFrame(runt))
+	if got, _ := peer.Read(50 * time.Millisecond); len(got) != minWireFrame || !bytes.Equal(got[:len(runt)], runt) {
+		t.Fatalf("runt frame must reach the adapter padded to %d, got %d", minWireFrame, len(got))
 	}
 	if b.Deliver([]byte{0x45, 0, 0, 20}) {
 		t.Fatal("an IPv4 packet must not be taken as L2")
