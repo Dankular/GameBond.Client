@@ -175,7 +175,7 @@ function errorSection(d) {
   const rows = order.map(i => {
     const tr = document.createElement('tr'), k = kinds[i], name = document.createElement('td'), sw = document.createElement('span');
     sw.className = 'err-sw'; sw.style.background = errColor(kinds, i); name.append(sw, k.label);
-    const count = issueCell(folded.totals[i].toLocaleString(), 'num'), rate = issueCell((folded.totals[i] / hours).toFixed(folded.totals[i] / hours < 10 ? 1 : 0), 'num'), help = issueCell(k.help); help.classList.add('err-help');
+    const count = issueCell(folded.totals[i].toLocaleString(), 'num'), rate = issueCell((folded.totals[i] / hours).toLocaleString(undefined, {maximumFractionDigits: folded.totals[i] / hours < 10 ? 1 : 0}), 'num'), help = issueCell(k.help); help.classList.add('err-help');
     tr.append(name, issueCell(k.group), count, rate, help); return tr;
   });
   const recOrder = recKinds.map((k, i) => i).filter(i => recFolded.totals[i] > 0).sort((a, b) => recFolded.totals[b] - recFolded.totals[a]);
@@ -184,7 +184,7 @@ function errorSection(d) {
     line.setAttribute('width', 14); line.setAttribute('height', 8); line.style.marginRight = '6px';
     line.innerHTML = '<line x1="0" y1="4" x2="14" y2="4" stroke="' + recStyle[k.group].color + '" stroke-width="2" stroke-dasharray="' + recStyle[k.group].dash + '"' + (k.routine ? ' stroke-opacity=".4"' : '') + '/>'; name.append(line, k.label);
     const help = issueCell(k.help); help.classList.add('err-help');
-    tr.append(name, issueCell(k.group + (k.routine ? ' (always on)' : ' (recovery)')), issueCell(recFolded.totals[i].toLocaleString(), 'num'), issueCell((recFolded.totals[i] / hours).toFixed(recFolded.totals[i] / hours < 10 ? 1 : 0), 'num'), help); rows.push(tr);
+    tr.append(name, issueCell(k.group + (k.routine ? ' (always on)' : ' (recovery)')), issueCell(recFolded.totals[i].toLocaleString(), 'num'), issueCell((recFolded.totals[i] / hours).toLocaleString(undefined, {maximumFractionDigits: recFolded.totals[i] / hours < 10 ? 1 : 0}), 'num'), help); rows.push(tr);
   }
   const table = issueTable(['Type', 'Group', 'Count', 'Per hour', 'What it means'], rows); table.classList.add('err-table'); body.append(table);
   const span = z.window >= 86400 ? '24 h' : z.window >= 3600 ? z.window / 3600 + ' h' : z.window / 60 + ' min', soak = absorbedTotal ? ', ' + absorbedTotal.toLocaleString() + ' absorbed by redundancy' : '';

@@ -44,6 +44,7 @@ var Kinds = []Kind{
 	{"auth_errors", "Authentication failures", "Protocol", "Frames that failed authentication (wrong key, or not from the server)."},
 	{"malformed_frames", "Malformed frames", "Protocol", "Frames that could not be decoded."},
 	{"handshake_rejected", "Handshake rejected", "Protocol", "Handshake messages that were not accepted."},
+	{"ignored_restarting", "Server traffic ignored while a link re-handshakes", "Absorbed", "The link had been silent for 3 s, so this client began a new handshake. Genuine packets from the server that arrived before it finished were set aside; each was also sent on the other link."},
 	{"replay_rejected", "Replays rejected", "Protocol", "Authentic frames dropped as too old or too far ahead of the replay window."},
 	{"link_down", "Link went down", "Links", "A link changed from healthy to unhealthy."},
 	{"failover_suspected", "Failover suspected", "Links", "A path stopped answering and traffic was moved off it."},

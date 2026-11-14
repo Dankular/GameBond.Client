@@ -19,6 +19,7 @@ func errorCounters(s client.Snapshot, osErrors uint64, osOK bool) map[string]uin
 		"auth_errors":            s.Receiver.AuthenticationErrors,
 		"malformed_frames":       s.Receiver.Malformed,
 		"handshake_rejected":     s.Receiver.HandshakeRejected,
+		"ignored_restarting":     s.Receiver.IgnoredWhileRestarting,
 		"replay_rejected":        s.Receiver.ReplayTooOld + s.Receiver.ReplayTooFar,
 		"failover_suspected":     s.Sender.FailoverSuspected,
 		"path_stalls":            s.Receiver.PathStalls,
