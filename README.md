@@ -191,6 +191,12 @@ transport are in the [GameBond.Core](https://github.com/Dankular/GameBond.Core) 
 
 ### Unreleased
 
+**Layer 2 over the bond (opt-in, off by default; built, not yet enabled on a live exit)**
+- **Ethernet frames can ride the bond.** Core v0.1.33/v0.1.34 carry a whole frame as a Data payload behind marker `0xE2`; frame MTU 1394 (L3 1380). Control frames (ARP, ND, DHCP, IGMP, EAPOL, LLDP, BPDU) are sent as priority copies on tag 46, so they survive a lossy link.
+- **`l2_bridge`** in the client config passes one adapter's Ethernet frames through the tunnel (`enabled`, `interface_id`/`interface_name`, `frame_mtu`, `mac_limit`, `broadcast_pps`, `multicast_pps`, `unknown_unicast_pps`). The adapter must not also appear in `lan_devices`. The panel shows its status as `l2_bridge`. L2 payloads skip the OMR leg.
+- **A switch core protects the bridged domain**: per-port MAC cap, MAC aging, loop guard (a MAC that keeps moving between ports holds the offending port down for 30 s) and storm control for broadcast, multicast and unknown unicast.
+- **The server side** (`"l2"` section in the exit config) opens a TAP beside the TUN and runs the same switch. Still to do before a device can use it: bridge the TAP on the exit with a DHCP server and NAT on both exits, then PRP redundancy.
+
 **Metrics, alerting and measured-loss reporting**
 - **`slo_probe`** sends an ICMP echo through the tunnel to the server (`slo_target`, default 10.77.0.1) every `slo_probe_ms` (default 1000) and measures what really comes back: a probe not answered within 1 s is lost, charged to the minute it was sent. Results are kept per minute in `slo.db` (SQLite, WAL, 35-day retention) with an RTT histogram, and judged against objectives (delivery 99.99%, availability 99.95% of seconds, latency 99% at or under 150 ms, failover p95 5 s) with burn rates over 1 h, 6 h, 24 h, 7 d and 30 d and a 95% upper bound on loss. The status document gains an `slo` section.
 - **`metrics_addr`** (loopback only) serves Prometheus text at `/metrics`: path, receive, send, queue, outage, exit, health-alarm, probe and SLO series, all named `gamebond_*`. `ops/prometheus/` holds the alert rules (a test checks every metric they name is really exported), a Prometheus config and an Alertmanager example.
