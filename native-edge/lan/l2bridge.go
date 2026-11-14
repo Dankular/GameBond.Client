@@ -41,6 +41,7 @@ type L2Bridge struct {
 	toTunnel, fromTunnel, oversize   atomic.Uint64
 	queueFull, switchDrops, writeErr atomic.Uint64
 	trace                            l2Trace
+	read                             atomic.Uint64
 }
 
 // NewL2Bridge builds the bridge. submit queues a payload for the bond; classifier gives frames
@@ -72,6 +73,7 @@ func (b *L2Bridge) Run(ctx context.Context) error {
 			sweep = now
 		}
 		if f != nil {
+			b.read.Add(1)
 			b.FromAdapter(f)
 		}
 	}
@@ -176,6 +178,9 @@ func (b *L2Bridge) Deliver(payload []byte) bool {
 	}
 	return true
 }
+
+// FramesRead is how many frames the adapter has delivered to the bridge since it opened.
+func (b *L2Bridge) FramesRead() uint64 { return b.read.Load() }
 
 // Stats is the panel view.
 func (b *L2Bridge) Stats() map[string]any {

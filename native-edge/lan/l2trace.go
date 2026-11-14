@@ -3,6 +3,7 @@ package lan
 import (
 	"encoding/binary"
 	"fmt"
+	"net"
 	"sort"
 	"sync"
 	"time"
@@ -135,7 +136,30 @@ func describeFrame(f []byte) (class, desc string) {
 		}
 		return fmt.Sprintf("ipv4-proto%d", ip[9]), head + fmt.Sprintf("IPv4 proto %d %s>%s%s", ip[9], src, dst, extra)
 	case 0x86dd:
-		return "ipv6", head + "IPv6"
+		if len(f) < 14+40 {
+			return "ipv6", head + "IPv6 short"
+		}
+		ip := f[14:]
+		src, dst := net.IP(ip[8:24]).String(), net.IP(ip[24:40]).String()
+		switch nh := ip[6]; nh {
+		case 58:
+			if len(ip) > 40 {
+				return fmt.Sprintf("ipv6-icmp%d", ip[40]), head + fmt.Sprintf("ICMPv6 type=%d %s>%s", ip[40], src, dst)
+			}
+		case 17:
+			if len(ip) >= 48 {
+				sp, dp := binary.BigEndian.Uint16(ip[40:]), binary.BigEndian.Uint16(ip[42:])
+				if sp == 53 || dp == 53 {
+					return "ipv6-udp-dns", head + fmt.Sprintf("UDP6 [%s]:%d>[%s]:%d %s", src, sp, dst, dp, describeDNS(ip[48:], sp == 53))
+				}
+				return "ipv6-udp", head + fmt.Sprintf("UDP6 [%s]:%d>[%s]:%d", src, sp, dst, dp)
+			}
+		case 6:
+			if len(ip) >= 44 {
+				return "ipv6-tcp", head + fmt.Sprintf("TCP6 [%s]:%d>[%s]:%d", src, binary.BigEndian.Uint16(ip[40:]), dst, binary.BigEndian.Uint16(ip[42:]))
+			}
+		}
+		return fmt.Sprintf("ipv6-nh%d", ip[6]), head + fmt.Sprintf("IPv6 nh=%d %s>%s", ip[6], src, dst)
 	default:
 		return fmt.Sprintf("ethertype-%04x", et), head + fmt.Sprintf("ethertype %04x", et)
 	}

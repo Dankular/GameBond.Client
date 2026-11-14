@@ -123,6 +123,28 @@ func startL2Bridge(ctx context.Context, c *l2BridgeConfig, classifier *bond.Clas
 				// delivers another frame. The promiscuous watcher signals each link-down then link-up, and
 				// the bridge reopens the adapter.
 				runCtx, stopRun := context.WithCancel(ctx)
+				// A tap that has delivered nothing for 15 s while the link is up is deaf (the driver can lose
+				// its binding on a client restart); reopen it, at most every 15 s. A quiet segment still
+				// carries ARP and DHCP chatter, so silence is a fault, not idleness.
+				go func() {
+					tick := time.NewTicker(5 * time.Second)
+					defer tick.Stop()
+					lastRead, since := uint64(0), time.Now()
+					for {
+						select {
+						case <-runCtx.Done():
+							return
+						case <-tick.C:
+							if n := b.FramesRead(); n != lastRead {
+								lastRead, since = n, time.Now()
+							} else if time.Since(since) >= 15*time.Second && l2Promiscuous.Load() {
+								out(map[string]any{"status": "l2_bridge_reopen", "name": c.Name, "reason": "no frames read for 15 s"})
+								stopRun()
+								return
+							}
+						}
+					}
+				}()
 				go func() {
 					select {
 					case <-l2LinkBounced:
