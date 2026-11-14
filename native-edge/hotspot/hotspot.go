@@ -3,6 +3,7 @@
 package hotspot
 
 import (
+	"sort"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -574,6 +575,45 @@ func (m *Manager) Events() []Event {
 	defer m.mu.Unlock()
 	return append([]Event(nil), m.events...)
 }
+
+// Sessions lists the unexpired guest sessions for the dashboard, soonest expiry first. The
+// session cookie is a credential and is never included.
+func (m *Manager) Sessions(now time.Time) []map[string]any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	type row struct {
+		ip      netip.Addr
+		expires time.Time
+	}
+	var rows []row
+	for ip, session := range m.sessions {
+		if session.expires.After(now) {
+			rows = append(rows, row{ip, session.expires})
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].expires.Before(rows[j].expires) })
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, map[string]any{"guest": r.ip.String(), "expires_at": r.expires.Unix()})
+	}
+	return out
+}
+
+// ValidateDevices checks that every configured guest device is one of the client's LAN devices,
+// so a misspelt name fails at start instead of silently leaving a device without a portal.
+func (m *Manager) ValidateDevices(lan []string) error {
+	known := make(map[string]bool, len(lan))
+	for _, name := range lan {
+		known[name] = true
+	}
+	for _, guest := range m.cfg.Devices {
+		if !known[guest] {
+			return fmt.Errorf("hotspot guest device %q is not one of the lan_devices", guest)
+		}
+	}
+	return nil
+}
+
 func (m *Manager) IsGuest(name string) bool {
 	for _, guest := range m.cfg.Devices {
 		if guest == name {
