@@ -24,6 +24,7 @@ func lossCauses(s client.Snapshot) map[string]any {
 		"upload": map[string]any{
 			"frames_lost_on_wire": s.Sender.SackLost, "resent_at_once": s.Sender.SackResent,
 			"rescued_by_other_copy": heldNet(s.Sender.SackHeld, s.Sender.SackResent), "lost_on_both_links": s.Sender.SackResent, "unrecoverable_no_cache": s.Sender.SackUnrecoverable,
+			"unrecoverable_not_repairable": s.Sender.SackNotRepairable, "unrecoverable_expired": s.Sender.SackExpired, "unrecoverable_attempts_used": s.Sender.SackExhausted, "replays_skipped_copy_exists": s.Sender.ReplaySkipped,
 			"repair_copies_sent": s.Sender.RepairCopies,
 			// The server asked this client to resend an upload packet and it could not: why.
 			"repairs_refused": s.Sender.RepairUnavailableSent, "refused_not_cached": s.Sender.RepairNANotCached,
