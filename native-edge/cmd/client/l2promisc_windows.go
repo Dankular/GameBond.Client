@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"net/netip"
-	"strings"
 	"syscall"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -20,14 +20,32 @@ const sioRcvAll = 0x98000001
 // toward the gateway is lost on the wire side. SIO_RCVALL on a raw socket bound to the adapter makes
 // the miniport turn promiscuous mode on, the same switch a packet sniffer flips.
 func holdPromiscuous(ctx context.Context, interfaceID string, out func(map[string]any)) {
+	var prev windows.Handle = windows.InvalidHandle
+	defer func() {
+		if prev != windows.InvalidHandle {
+			windows.Closesocket(prev)
+		}
+	}()
+	lastErr := ""
 	for ctx.Err() == nil {
-		err := rcvAllOnce(ctx, interfaceID)
+		// An adapter restart clears the hardware filter, so the request is repeated on a fresh socket
+		// every few seconds; the old socket is closed only after the new one is on.
+		fd, err := rcvAllOn(interfaceID)
 		if err != nil {
-			out(map[string]any{"status": "l2_promiscuous_failed", "error": err.Error()})
+			if err.Error() != lastErr {
+				out(map[string]any{"status": "l2_promiscuous_failed", "reason": err.Error()})
+			}
+			lastErr = err.Error()
+		} else {
+			lastErr = ""
+			if prev != windows.InvalidHandle {
+				windows.Closesocket(prev)
+			}
+			prev = fd
 		}
 		select {
 		case <-ctx.Done():
-		case <-time.After(5 * time.Second):
+		case <-time.After(2 * time.Second):
 		}
 	}
 }
@@ -59,34 +77,26 @@ func adapterIPv4(guid string) (netip.Addr, bool) {
 	return netip.Addr{}, false
 }
 
-func rcvAllOnce(ctx context.Context, interfaceID string) error {
+func rcvAllOn(interfaceID string) (windows.Handle, error) {
 	ip, ok := adapterIPv4(interfaceID)
 	if !ok {
-		return windows.WSAEADDRNOTAVAIL
+		return windows.InvalidHandle, windows.WSAEADDRNOTAVAIL
 	}
 	fd, err := windows.Socket(windows.AF_INET, windows.SOCK_RAW, windows.IPPROTO_IP)
 	if err != nil {
-		return err
+		return windows.InvalidHandle, err
 	}
-	defer windows.Closesocket(fd)
 	if err := windows.Bind(fd, &windows.SockaddrInet4{Addr: ip.As4()}); err != nil {
-		return err
+		windows.Closesocket(fd)
+		return windows.InvalidHandle, err
 	}
 	on := uint32(1) // RCVALL_ON
 	var n uint32
 	if err := windows.WSAIoctl(fd, sioRcvAll, (*byte)(unsafe.Pointer(&on)), 4, nil, 0, &n, nil, 0); err != nil {
-		return err
+		windows.Closesocket(fd)
+		return windows.InvalidHandle, err
 	}
-	// The socket must stay open while the bridge runs; drain it so Windows never queues the copies.
-	go func() { <-ctx.Done(); windows.Closesocket(fd) }()
-	buf := make([]byte, 2048)
-	for ctx.Err() == nil {
-		if _, _, err := windows.Recvfrom(fd, buf, 0); err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
-		}
-	}
-	return nil
+	// Copies queue on the socket until it is closed; a small receive buffer makes Windows drop them.
+	windows.SetsockoptInt(fd, windows.SOL_SOCKET, windows.SO_RCVBUF, 4096)
+	return fd, nil
 }
