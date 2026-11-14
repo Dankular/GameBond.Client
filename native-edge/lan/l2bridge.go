@@ -81,6 +81,16 @@ func (b *L2Bridge) FromAdapter(frame []byte) {
 	now := b.now()
 	if len(frame) > b.cfg.FrameMTU {
 		b.oversize.Add(1)
+		fwd, back, ok := oversizeIPv4(frame, b.cfg.FrameMTU)
+		if !ok {
+			return
+		}
+		for _, f := range back {
+			b.io.Write(padWire(f))
+		}
+		for _, f := range fwd {
+			b.FromAdapter(f)
+		}
 		return
 	}
 	v := b.sw.Forward(L2PortLAN, frame, now)
@@ -112,6 +122,14 @@ func (b *L2Bridge) FromAdapter(frame []byte) {
 
 // minWireFrame is the size frames are padded to before they reach the adapter.
 const minWireFrame = 120
+
+// padWire pads a runt frame the way a NIC would before it reaches the raw adapter write.
+func padWire(f []byte) []byte {
+	if len(f) >= minWireFrame {
+		return f
+	}
+	return append(append(make([]byte, 0, minWireFrame), f...), make([]byte, minWireFrame-len(f))...)
+}
 
 // Deliver handles an L2 payload that arrived over the bond and reports whether it was an L2
 // payload (so the caller never hands it to the IP stack, delivered or not).
