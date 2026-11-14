@@ -361,6 +361,12 @@ func session(parent context.Context, ready func(), logOut, relayOnly io.Writer) 
 	if mtu == 0 {
 		mtu = 1280
 	}
+	// A bridged Ethernet frame is carried whole inside one datagram, so the limit has to admit the
+	// largest frame the bridge may send (1500) plus its marker byte, whatever the L3 mtu is.
+	outerMTU := mtu
+	if len(cfg.L2Bridge) > 0 {
+		outerMTU = max(outerMTU, 1501)
+	}
 	outer, err := outerSettings(cfg.OuterTransport)
 	if err != nil {
 		return err
@@ -535,7 +541,7 @@ func session(parent context.Context, ready func(), logOut, relayOnly io.Writer) 
 			fmt.Println(string(b))
 			sr.NoteSwitch(from, to, reason)
 		}, Key: key, Session: session, Server: peer, Uplinks: specs, Available: available,
-		MTU: mtu + bond.Overhead + 24, Discover: cfg.PathMTU, Failover: cfg.FailoverReplay, FlowPinning: cfg.FlowPinning, StripeAbove: cfg.StripeAbove, CoDel: cfg.CoDel, ParityRowsMin: cfg.ParityRowsMin, ParityRowsMax: cfg.ParityRowsMax,
+		MTU: outerMTU + bond.Overhead + 24, Discover: cfg.PathMTU, Failover: cfg.FailoverReplay, FlowPinning: cfg.FlowPinning, StripeAbove: cfg.StripeAbove, CoDel: cfg.CoDel, ParityRowsMin: cfg.ParityRowsMin, ParityRowsMax: cfg.ParityRowsMax,
 		InitialMbps: max(cfg.InitialMbps, 1), MaxMbps: max(cfg.MaxMbps, 100), Deliver: routed.Deliver, Outer: outer, QoS: &qosSettings, LossTracking: cfg.LossTracking, DelayControl: cfg.DelayControl}
 	c, err := client.New(clientCfg)
 	if err != nil {
