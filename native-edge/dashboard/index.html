@@ -134,7 +134,7 @@ function renderRedundancy(d, paths) {
     ["Rebuilt from parity (download)", num(down.rebuilt_from_parity)],
     ["Delivered ahead of a gap / gap filled by the other copy", num(down.holes_given_up) + " / " + num(down.arrived_after_deadline)],
     ["Repairs asked / exhausted", num(down.repairs_asked) + " / " + num(down.repairs_exhausted)],
-    ["Upload: copies lost on a link", num(up.frames_lost_on_wire) + " (per copy). Recovered: " + num(up.rescued_by_other_copy) + " by the other link's copy; " + num(up.lost_on_both_links) + " packets lost on both links and resent. Not recovered: " + num(up.unrecoverable_no_cache)],
+    ["Upload: copies lost on a link", num(up.frames_lost_on_wire) + " (per copy). Recovered: " + num(up.rescued_by_other_copy) + " by the other link's copy; " + num(up.lost_on_both_links) + " packets lost on both links and resent. Not recovered: " + num(up.unrecoverable_no_cache) + " (" + num(up.unrecoverable_not_repairable) + " never cached, e.g. UDP; " + num(up.unrecoverable_expired) + " gone from the cache; " + num(up.unrecoverable_attempts_used) + " all resends used). Failover replays skipped because a copy already existed: " + num(up.replays_skipped_copy_exists)],
     ["Upload recovery", "SACK lost " + num(snd.SackLost) + ", tail probes " + num(snd.TailProbed) + ", repair copies " + num(snd.RepairCopies) + ", throttled " + num(snd.RepairThrottled)],
     ["Reed-Solomon / XOR parity sent", num(snd.ParityRSSent) + " / " + num(snd.ParitySent)],
     ["Dropped inside this PC", num(local.os_udp_receive_errors) + " OS receive errors, " + num(local.socket_send_errors) + " send errors, " + num(local.delivery_queue_full) + " queue full"],
