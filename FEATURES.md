@@ -54,47 +54,48 @@ one. "Default" is the value when the flag is absent. Counters appear under
 - Starlink dish telemetry as a degraded-path hint.
 - Optional HTTPS admin portal on the server ([admin-portal.md](docs/admin-portal.md)).
 
-## Layer 2 gateway features (planned)
+## Layer 2 Gateway Features
 
-These features target a separately supervised Linux gateway control plane. The current tunnel server remains isolated from host networking. A feature will be marked supported only when its provider reports host capability and verifies the effective state.
+These features target a separately supervised Linux gateway control plane. The current tunnel server remains isolated from host networking. A feature is supported only when its provider reports host capability and verifies the effective state; entries with notes below describe the exact implementation boundary.
 
 ### Switching and network isolation
 
-- Virtual Network Override.
-- Jumbo Frames.
-- Port Isolation.
-- MAC-Based Port Restriction.
-- MAC Address Blocking.
-- MAC-Based ACLs & Device Isolation.
-- IP-Based ACLs & Network Isolation.
+- [x] Virtual Network Override.
+- [x] Jumbo Frames.
+- [x] Port Isolation.
+- [x] MAC-Based Port Restriction.
+- [x] MAC Address Blocking.
+- [x] MAC-Based ACLs & Device Isolation.
+- [x] IP-Based ACLs & Network Isolation.
 
 ### Resilience and aggregation
 
-- LACP Port Aggregation.
-- MC-LAG (requires a compatible peer/provider).
-- STP & RSTP.
-- Loop Protection.
-- Redundancy.
-- Shadow Mode (VRRP) Gateway Failover.
+- [x] LACP Port Aggregation.
+- [ ] MC-LAG (requires a compatible peer/provider).
+- [x] STP & RSTP (Linux bridge STP and `mstpd` RSTP; known local systemd controllers are checked, while arbitrary external controllers cannot be discovered reliably).
+- [ ] Loop Protection (Linux bridge BPDU guard is available; general loop detection, blocking and timed recovery are not integrated).
+- [x] Redundancy (health/status coordinator over LACP, STP/RSTP and VRRP).
+- [x] Shadow Mode (VRRP) Gateway Failover.
 
 ### Multicast and media
 
-- IGMP Snooping.
-- Advanced IGMP Configuration (Querier, Fast Leave, Router Port).
-- Voice VLAN.
-- LLDP-MED.
-- Pro AV Profiles: Play, Dante, Q-SYS, NDI, SDVoE, Shure, AES67, Crestron.
+- [x] IGMP Snooping.
+- [x] Advanced IGMP Configuration (Querier, Fast Leave, Router Port).
+- [x] Voice VLAN.
+- [x] LLDP-MED (power-via-MDI is not exposed until provider and NIC support are probed).
+- [ ] Pro AV Profiles: Play, Dante, Q-SYS, NDI, SDVoE, Shure, AES67, Crestron (documented catalogue and per-network selection; profile-specific host enforcement is not integrated).
 
 ### Access and traffic control
 
-- DHCP Snooping & Guarding.
-- 802.1X Control.
-- Egress Rate Limit.
-- Flow Control.
-- QoS (DSCP).
-- Storm Control.
-- Multicast & Broadcast Rate Limiting.
-- Port Mirroring.
+- [x] DHCP Snooping & Guarding (trusted/untrusted server filtering and request rate limits; per-client binding enforcement is unavailable without authoritative DHCP ingress metadata).
+- [x] 802.1X Control (wired fail-closed RADIUS authentication on explicitly exclusive ports; shared downstreams and configured STP/RSTP are rejected).
+- [x] Egress Rate Limit.
+- [x] Flow Control.
+- [x] QoS (DSCP).
+- [x] Storm Control (broadcast and multicast; unknown-unicast classification is unsupported).
+- [x] Multicast & Broadcast Rate Limiting.
+- [x] Port Mirroring.
+
 
 ## Captive hotspot portal
 
