@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"net/netip"
-	"syscall"
 	"strings"
 	"time"
 	"unsafe"
@@ -19,42 +18,63 @@ const sioRcvAll = 0x98000001
 // not own, so without this the devices' ARP and DHCP broadcasts arrive but every unicast frame
 // toward the gateway is lost on the wire side. SIO_RCVALL on a raw socket bound to the adapter makes
 // the miniport turn promiscuous mode on, the same switch a packet sniffer flips.
+//
+// One socket is held for as long as the link stays up with the same address. It is opened again only
+// after the link has gone down (an adapter restart clears the hardware filter) or the address has
+// changed; opening and closing sockets on a timer reprograms the receive filter of a USB adapter
+// over and over, which is not something to do to a live bridge.
 func holdPromiscuous(ctx context.Context, interfaceID string, out func(map[string]any)) {
-	var prev windows.Handle = windows.InvalidHandle
-	defer func() {
-		if prev != windows.InvalidHandle {
-			windows.Closesocket(prev)
+	var fd windows.Handle = windows.InvalidHandle
+	var heldIP netip.Addr
+	closeHeld := func() {
+		if fd != windows.InvalidHandle {
+			windows.Closesocket(fd)
+			fd = windows.InvalidHandle
 		}
-	}()
+		l2Promiscuous.Store(false)
+	}
+	defer closeHeld()
 	lastErr := ""
+	fail := func(err error) {
+		l2Promiscuous.Store(false)
+		l2PromiscuousWhy.Store(err.Error())
+		if err.Error() != lastErr {
+			out(map[string]any{"status": "l2_promiscuous_failed", "reason": err.Error()})
+		}
+		lastErr = err.Error()
+	}
 	for ctx.Err() == nil {
-		// An adapter restart clears the hardware filter, so the request is repeated on a fresh socket
-		// every few seconds; the old socket is closed only after the new one is on.
-		fd, err := rcvAllOn(interfaceID)
-		if err != nil {
-			l2Promiscuous.Store(false)
-			l2PromiscuousWhy.Store(err.Error())
-			if err.Error() != lastErr {
-				out(map[string]any{"status": "l2_promiscuous_failed", "reason": err.Error()})
+		ip, up, ok := adapterState(interfaceID)
+		switch {
+		case !ok || !up:
+			closeHeld()
+			fail(windows.WSAENETDOWN)
+		case fd != windows.InvalidHandle && ip == heldIP:
+			// Held and unchanged: nothing to do.
+		case !ip.IsValid():
+			closeHeld()
+			fail(windows.WSAEADDRNOTAVAIL)
+		default:
+			closeHeld()
+			if h, err := rcvAllOn(ip); err != nil {
+				fail(err)
+			} else {
+				fd, heldIP = h, ip
+				lastErr = ""
+				l2Promiscuous.Store(true)
+				l2PromiscuousWhy.Store("")
+				out(map[string]any{"status": "l2_promiscuous_on", "address": ip.String()})
 			}
-			lastErr = err.Error()
-		} else {
-			lastErr = ""
-			l2Promiscuous.Store(true)
-			l2PromiscuousWhy.Store("")
-			if prev != windows.InvalidHandle {
-				windows.Closesocket(prev)
-			}
-			prev = fd
 		}
 		select {
 		case <-ctx.Done():
-		case <-time.After(2 * time.Second):
+		case <-time.After(time.Second):
 		}
 	}
 }
 
-func adapterIPv4(guid string) (netip.Addr, bool) {
+// adapterState returns the adapter's first IPv4 address and whether its link is operationally up.
+func adapterState(guid string) (ip netip.Addr, up, ok bool) {
 	var size uint32 = 16 * 1024
 	for i := 0; i < 3; i++ {
 		buf := make([]byte, size)
@@ -64,28 +84,27 @@ func adapterIPv4(guid string) (netip.Addr, bool) {
 			continue
 		}
 		if err != nil {
-			return netip.Addr{}, false
+			return netip.Addr{}, false, false
 		}
 		for ; aa != nil; aa = aa.Next {
 			if !strings.EqualFold(strings.Trim(windows.BytePtrToString(aa.AdapterName), "{}"), strings.Trim(guid, "{}")) {
 				continue
 			}
+			up = aa.OperStatus == windows.IfOperStatusUp
 			for ua := aa.FirstUnicastAddress; ua != nil; ua = ua.Next {
 				if sa := ua.Address.Sockaddr; sa != nil && sa.Addr.Family == windows.AF_INET {
-					return netip.AddrFrom4((*syscall.RawSockaddrInet4)(unsafe.Pointer(sa)).Addr), true
+					a4 := (*windows.RawSockaddrInet4)(unsafe.Pointer(sa)).Addr
+					return netip.AddrFrom4(a4), up, true
 				}
 			}
+			return netip.Addr{}, up, true
 		}
-		return netip.Addr{}, false
+		return netip.Addr{}, false, false
 	}
-	return netip.Addr{}, false
+	return netip.Addr{}, false, false
 }
 
-func rcvAllOn(interfaceID string) (windows.Handle, error) {
-	ip, ok := adapterIPv4(interfaceID)
-	if !ok {
-		return windows.InvalidHandle, windows.WSAEADDRNOTAVAIL
-	}
+func rcvAllOn(ip netip.Addr) (windows.Handle, error) {
 	fd, err := windows.Socket(windows.AF_INET, windows.SOCK_RAW, windows.IPPROTO_IP)
 	if err != nil {
 		return windows.InvalidHandle, err
@@ -100,7 +119,7 @@ func rcvAllOn(interfaceID string) (windows.Handle, error) {
 		windows.Closesocket(fd)
 		return windows.InvalidHandle, err
 	}
-	// Copies queue on the socket until it is closed; a small receive buffer makes Windows drop them.
+	// Copies queue on the socket until it is closed; a tiny receive buffer makes Windows drop them.
 	windows.SetsockoptInt(fd, windows.SOL_SOCKET, windows.SO_RCVBUF, 4096)
 	return fd, nil
 }
