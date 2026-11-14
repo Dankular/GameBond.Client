@@ -45,7 +45,7 @@ func adapterIPv4(guid string) (netip.Addr, bool) {
 			return netip.Addr{}, false
 		}
 		for ; aa != nil; aa = aa.Next {
-			if !strings.EqualFold(windows.BytePtrToString(aa.AdapterName), strings.Trim(guid, "{}")) {
+			if !strings.EqualFold(strings.Trim(windows.BytePtrToString(aa.AdapterName), "{}"), strings.Trim(guid, "{}")) {
 				continue
 			}
 			for ua := aa.FirstUnicastAddress; ua != nil; ua = ua.Next {
