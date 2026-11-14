@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"net/netip"
+	"os/exec"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -35,6 +38,7 @@ func holdPromiscuous(ctx context.Context, interfaceID string, out func(map[strin
 	}
 	defer closeHeld()
 	lastErr := ""
+	noAddr, pinned := 0, false
 	fail := func(err error) {
 		l2Promiscuous.Store(false)
 		l2PromiscuousWhy.Store(err.Error())
@@ -44,17 +48,26 @@ func holdPromiscuous(ctx context.Context, interfaceID string, out func(map[strin
 		lastErr = err.Error()
 	}
 	for ctx.Err() == nil {
-		ip, up, ok := adapterState(interfaceID)
+		ip, up, idx, ok := adapterState(interfaceID)
 		switch {
 		case !ok || !up:
 			closeHeld()
+			pinned = false
 			fail(windows.WSAENETDOWN)
 		case fd != windows.InvalidHandle && ip == heldIP:
 			// Held and unchanged: nothing to do.
+			noAddr = 0
 		case !ip.IsValid():
 			closeHeld()
 			fail(windows.WSAEADDRNOTAVAIL)
+			// A bridge adapter in tunnel mode never completes DHCP, and Windows takes a long time to fall
+			// back to a link-local address, so give it a fixed one: SIO_RCVALL needs an address to bind.
+			if noAddr++; noAddr >= 2 && !pinned {
+				pinned = true
+				pinLinkLocal(idx)
+			}
 		default:
+			noAddr = 0
 			closeHeld()
 			if h, err := rcvAllOn(ip); err != nil {
 				fail(err)
@@ -74,7 +87,7 @@ func holdPromiscuous(ctx context.Context, interfaceID string, out func(map[strin
 }
 
 // adapterState returns the adapter's first IPv4 address and whether its link is operationally up.
-func adapterState(guid string) (ip netip.Addr, up, ok bool) {
+func adapterState(guid string) (ip netip.Addr, up bool, ifIndex uint32, ok bool) {
 	var size uint32 = 16 * 1024
 	for i := 0; i < 3; i++ {
 		buf := make([]byte, size)
@@ -84,24 +97,25 @@ func adapterState(guid string) (ip netip.Addr, up, ok bool) {
 			continue
 		}
 		if err != nil {
-			return netip.Addr{}, false, false
+			return netip.Addr{}, false, 0, false
 		}
 		for ; aa != nil; aa = aa.Next {
 			if !strings.EqualFold(strings.Trim(windows.BytePtrToString(aa.AdapterName), "{}"), strings.Trim(guid, "{}")) {
 				continue
 			}
 			up = aa.OperStatus == windows.IfOperStatusUp
+			ifIndex = aa.IfIndex
 			for ua := aa.FirstUnicastAddress; ua != nil; ua = ua.Next {
 				if sa := ua.Address.Sockaddr; sa != nil && sa.Addr.Family == windows.AF_INET {
 					a4 := (*windows.RawSockaddrInet4)(unsafe.Pointer(sa)).Addr
-					return netip.AddrFrom4(a4), up, true
+					return netip.AddrFrom4(a4), up, ifIndex, true
 				}
 			}
-			return netip.Addr{}, up, true
+			return netip.Addr{}, up, ifIndex, true
 		}
-		return netip.Addr{}, false, false
+		return netip.Addr{}, false, 0, false
 	}
-	return netip.Addr{}, false, false
+	return netip.Addr{}, false, 0, false
 }
 
 func rcvAllOn(ip netip.Addr) (windows.Handle, error) {
@@ -122,4 +136,15 @@ func rcvAllOn(ip netip.Addr) (windows.Handle, error) {
 	// Copies queue on the socket until it is closed; a tiny receive buffer makes Windows drop them.
 	windows.SetsockoptInt(fd, windows.SOL_SOCKET, windows.SO_RCVBUF, 4096)
 	return fd, nil
+}
+
+// pinLinkLocal adds a fixed link-local address to the bridge adapter. The range never routes, and the
+// adapter carries only the bridge, so this changes nothing the host uses.
+func pinLinkLocal(ifIndex uint32) {
+	if ifIndex == 0 {
+		return
+	}
+	cmd := exec.Command("netsh", "interface", "ipv4", "add", "address", "name="+strconv.FormatUint(uint64(ifIndex), 10), "169.254.77.1", "255.255.0.0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	cmd.Run()
 }
