@@ -121,7 +121,7 @@ func describeFrame(f []byte) (class, desc string) {
 							flags += n
 						}
 					}
-					flags = " [" + flags + "]"
+					flags = " [" + flags + "]" + tcpDetail(ip, ihl)
 				}
 				if ip[9] == 17 && (sp == 53 || dp == 53) && len(f) >= 14+ihl+8+12 {
 					name = "udp-dns"
@@ -211,4 +211,42 @@ func describeDNS(m []byte, response bool) string {
 		tc = " TRUNCATED"
 	}
 	return fmt.Sprintf("A %s %s %s answers=%d%s", t, name, rs, an, tc)
+}
+
+// tcpDetail adds sequence, acknowledgement, window, payload length and SACK blocks to a TCP summary, the
+// numbers needed to see which segment a peer says it is missing.
+func tcpDetail(ip []byte, ihl int) string {
+	t := ip[ihl:]
+	if len(t) < 20 {
+		return ""
+	}
+	off := int(t[12]>>4) * 4
+	total := int(binary.BigEndian.Uint16(ip[2:]))
+	out := fmt.Sprintf(" seq=%d ack=%d win=%d len=%d", binary.BigEndian.Uint32(t[4:]), binary.BigEndian.Uint32(t[8:]), binary.BigEndian.Uint16(t[14:]), total-ihl-off)
+	for i := 20; i+2 <= off && i+2 <= len(t); {
+		k := t[i]
+		if k == 0 {
+			break
+		}
+		if k == 1 {
+			i++
+			continue
+		}
+		l := int(t[i+1])
+		if l < 2 || i+l > len(t) {
+			break
+		}
+		switch k {
+		case 2:
+			if l == 4 {
+				out += fmt.Sprintf(" mss=%d", binary.BigEndian.Uint16(t[i+2:]))
+			}
+		case 5:
+			for j := i + 2; j+8 <= i+l; j += 8 {
+				out += fmt.Sprintf(" sack=%d-%d", binary.BigEndian.Uint32(t[j:]), binary.BigEndian.Uint32(t[j+4:]))
+			}
+		}
+		i += l
+	}
+	return out
 }
