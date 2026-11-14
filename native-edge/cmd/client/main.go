@@ -733,7 +733,7 @@ func run() error {
 		go ttyrelay.ServeSupervisor(ctx, *ttyPath, owner, nil)
 		status := launcher.Supervise(ctx, owner, func(c context.Context, ready func()) error {
 			return session(c, ready, logOut, relayOnly)
-		}, launcher.Options{Once: *onceFlag, InitiallyStopped: *stoppedFlag, Log: func(m string) { fmt.Fprintln(logOut, m) }})
+		}, launcher.Options{Once: *onceFlag, InitiallyStopped: *stoppedFlag, AutoRestart: true, Log: func(m string) { fmt.Fprintln(logOut, m) }})
 		if status != 0 {
 			return fmt.Errorf("the tunnel failed (see the log)")
 		}

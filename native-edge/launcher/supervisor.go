@@ -155,6 +155,11 @@ type RunFunc func(ctx context.Context, ready func()) error
 type Options struct {
 	Once             bool
 	InitiallyStopped bool
+	// AutoRestart relaunches the tunnel after a run fails on its own (the netstack crashed, a
+	// listener died) instead of waiting for someone to ask: a dead tunnel is an outage, and nobody
+	// is watching at 3 am. Delays grow from 2 s to 30 s while it keeps failing quickly. A stop
+	// request cancels the pending relaunch.
+	AutoRestart bool
 	// Poll is how often the idle loop checks for shutdown (200 ms in Python).
 	Poll time.Duration
 	// Log receives the traceback equivalent for failed runs.
@@ -175,6 +180,8 @@ func Supervise(ctx context.Context, owner *Owner, run RunFunc, opt Options) int 
 	var rmu sync.Mutex // ready may be called from the tunnel's own goroutines
 	status := 0
 	var lastFailure error
+	var retryAt time.Time
+	quickFailures := 0
 	if opt.InitiallyStopped {
 		owner.SetState("stopped")
 	}
@@ -212,6 +219,7 @@ func Supervise(ctx context.Context, owner *Owner, run RunFunc, opt Options) int 
 			}
 			var failed error
 			lastFailure = nil
+			startedAt := time.Now()
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
@@ -249,23 +257,37 @@ func Supervise(ctx context.Context, owner *Owner, run RunFunc, opt Options) int 
 				return status
 			}
 			shouldRun = false
+			if failed != nil && opt.AutoRestart && ctx.Err() == nil {
+				if time.Since(startedAt) > time.Minute {
+					quickFailures = 0
+				}
+				delay := min(2*time.Second<<min(quickFailures, 4), 30*time.Second)
+				quickFailures++
+				retryAt = time.Now().Add(delay)
+				opt.Log(fmt.Sprintf("tunnel failed; relaunching in %s", delay))
+			}
 		}
 		select {
 		case req := <-owner.requests:
 			switch req.command {
 			case "stop":
+				retryAt = time.Time{}
 				state := "stopped"
 				if lastFailure != nil {
 					state = "failed"
 				}
 				owner.Complete(req.id, lastFailure == nil, state, lastFailure)
 			case "restart":
+				retryAt = time.Time{}
 				rmu.Lock()
 				restart = req.id
 				rmu.Unlock()
 				shouldRun = true
 			}
 		case <-time.After(opt.Poll):
+			if !retryAt.IsZero() && !time.Now().Before(retryAt) {
+				retryAt, shouldRun = time.Time{}, true
+			}
 		case <-owner.Shutdown():
 			return status
 		case <-ctx.Done():
