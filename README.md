@@ -189,13 +189,32 @@ with every change that alters behaviour and give it the commit once it is commit
 transport are in the [GameBond.Core](https://github.com/Dankular/GameBond.Core) changelog and the server's are in
 [GameBond.Server](https://github.com/Dankular/GameBond.Server); this one records what the client picks up from them.
 
-### Unreleased
+### Layer 2 over the bond, first version (Core v0.1.33 and v0.1.34, Server e8a12b7 and bea4d35, client 1d9559f)
 
-**Layer 2 over the bond (opt-in, off by default; built, not yet enabled on a live exit)**
-- **Ethernet frames can ride the bond.** Core v0.1.33/v0.1.34 carry a whole frame as a Data payload behind marker `0xE2`; frame MTU 1394 (L3 1380). Control frames (ARP, ND, DHCP, IGMP, EAPOL, LLDP, BPDU) are sent as priority copies on tag 46, so they survive a lossy link.
-- **`l2_bridge`** in the client config passes one adapter's Ethernet frames through the tunnel (`enabled`, `interface_id`/`interface_name`, `frame_mtu`, `mac_limit`, `broadcast_pps`, `multicast_pps`, `unknown_unicast_pps`). The adapter must not also appear in `lan_devices`. The panel shows its status as `l2_bridge`. L2 payloads skip the OMR leg.
-- **A switch core protects the bridged domain**: per-port MAC cap, MAC aging, loop guard (a MAC that keeps moving between ports holds the offending port down for 30 s) and storm control for broadcast, multicast and unknown unicast.
-- **The server side** (`"l2"` section in the exit config) opens a TAP beside the TUN and runs the same switch. Still to do before a device can use it: bridge the TAP on the exit with a DHCP server and NAT on both exits, then PRP redundancy.
+Opt-in and off by default. The code is built, tested and deployed to both exits as an image, but no device uses it yet.
+
+**Carriage (Core `bond/l2.go`)**
+- **A whole Ethernet frame rides the bond** as a Data payload behind marker `0xE2`. Frame MTU is 1394 (L3 1380); an oversized frame is counted and dropped, never fragmented.
+- **Frames are classified, not just forwarded.** ARP, ND, DHCP, IGMP, EAPOL, LLDP and bridge-group (BPDU) frames are control frames: they are sent as priority copies on tag 46 so a lossy link cannot eat them. VLAN tags pass through untouched (one flat VLAN, as today).
+- **A session without L2 refuses frames** (`L2Refused`), so a misconfigured peer cannot inject any.
+
+**Switch core (Core `bond/l2switch.go`)**
+- MAC learning with aging (300 s default) and a bounded table (4096).
+- **Per-port MAC cap**, released as entries age.
+- **Loop guard:** a MAC that keeps moving between ports (5 moves in 10 s) holds the offending port down for 30 s.
+- **Storm control** per port for broadcast, multicast and unknown unicast, as token buckets.
+- **Port isolation** (isolated ports talk only to the uplink) and drop of group-address sources and malformed frames.
+- Counters for all of it (`L2SwitchStats`) for the panel.
+
+**Client (`l2_bridge`)**
+- `l2_bridge` in the client config passes one adapter's Ethernet frames through the tunnel: `enabled`, `interface_id` or `interface_name`, `frame_mtu`, `mac_limit`, `broadcast_pps`, `multicast_pps`, `unknown_unicast_pps`. The adapter must not also be in `lan_devices`. It retries every 5 s until the adapter is there, skips the OMR leg, and reports as `l2_bridge` in the status document.
+
+**Server (`l2` section of the exit config)**
+- Opens a TAP (`gamebond-tap0`) beside the TUN and runs the same switch; stats (to_tap, from_tap, FDB size, drops by reason, loop holds) appear under `l2`. A real-TAP test passes on the backup exit.
+
+**Not done yet:** bridging the TAP on the exits with a DHCP server and NAT (both exits), PRP redundancy, the panel section, a lossy-link simulator test. Until then enabling it for a device would take that device off the LAN gateway.
+
+### Unreleased
 
 **Metrics, alerting and measured-loss reporting**
 - **`slo_probe`** sends an ICMP echo through the tunnel to the server (`slo_target`, default 10.77.0.1) every `slo_probe_ms` (default 1000) and measures what really comes back: a probe not answered within 1 s is lost, charged to the minute it was sent. Results are kept per minute in `slo.db` (SQLite, WAL, 35-day retention) with an RTT histogram, and judged against objectives (delivery 99.99%, availability 99.95% of seconds, latency 99% at or under 150 ms, failover p95 5 s) with burn rates over 1 h, 6 h, 24 h, 7 d and 30 d and a 95% upper bound on loss. The status document gains an `slo` section.
