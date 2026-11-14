@@ -114,6 +114,18 @@ function topologyDevices() {
   return { routed, others: others.slice(0, 12), extra: Math.max(0, others.length - 12) };
 }
 
+// Layer 2 bridge: frame counters from the client's l2_bridge block, turned into rates between renders.
+const l2Prev = { at: 0, to: 0, from: 0, toBps: 0, fromBps: 0 };
+function l2Rates(b) {
+  const now = performance.now() / 1000, to = Number(b.to_tunnel) || 0, from = Number(b.from_tunnel) || 0;
+  if (l2Prev.at && now - l2Prev.at >= 0.5) {
+    const dt = now - l2Prev.at;
+    l2Prev.toBps = Math.max(0, to - l2Prev.to) / dt; l2Prev.fromBps = Math.max(0, from - l2Prev.from) / dt;
+    l2Prev.at = now; l2Prev.to = to; l2Prev.from = from;
+  } else if (!l2Prev.at) { l2Prev.at = now; l2Prev.to = to; l2Prev.from = from; }
+  return { toFps: l2Prev.toBps, fromFps: l2Prev.fromBps };
+}
+
 function overallHealth(paths) {
   if (!paths.length) return ['poor', 'The tunnel is not connected'];
   const down = paths.filter(p => !p.healthy);
@@ -333,7 +345,7 @@ function renderTopology() {
 
   topoMap.replaceChildren();
   const exit = current?.exit, standbys = (exit?.servers || []).filter(x => !x.active);
-  const rowGap = 72, rows = Math.max(paths.length, routed.length + others.length, 2, standbys.length ? Math.ceil(2 + standbys.length * 1.6) : 0), height = 40 + rows * rowGap;
+  const rowGap = 72, rows = Math.max(paths.length, routed.length + others.length + (current?.l2_bridge ? 2 : 0), 2, standbys.length ? Math.ceil(2 + standbys.length * 1.6) : 0), height = 40 + rows * rowGap;
   topoMap.setAttribute('viewBox', '0 0 1060 ' + height);
   const midY = height / 2 - 24, serverX = 10, linkX = 215, pcX = 420, hubX = 625, devX = 850, w = 180, h = 46, dh = 62; // dh: routed-device nodes carry a third line (active ports)
   const onBackup = !!exit?.on_backup;
@@ -388,6 +400,17 @@ function renderTopology() {
   if (extra) topoMap.append(svg('text', { class: 'tb-sub', x: devX, y: height - 8, 'font-size': 11 }, '+' + extra + ' more LAN devices (see the Devices tab)'));
   if (!all.length) topoMap.append(svg('text', { class: 'tb-sub', x: devX, y: midY + 28, 'font-size': 12 }, 'No devices seen yet'));
 
+  // Layer 2 bridge: the adapter is carried as Ethernet frames through the bond to the exit's userspace gateway
+  // (ARP, DHCP and every flow terminated there), so the devices keep their own MACs instead of a routed tunnel IP.
+  const l2 = current?.l2_bridge;
+  if (l2) {
+    const r = l2Rates(l2), by = height - 62;
+    topoMap.append(mapLine(pcX + w, midY + h / 2, hubX, by + h / 2, false, null, { down: r.fromFps * 1000, up: r.toFps * 1000 }));
+    topoMap.append(nodeBox(hubX, by, w, h, 'Layer 2 bridge · ' + (l2.name || 'adapter'), (l2.up ? 'up' : 'down') + ' · ' + (l2.fdb_size ?? 0) + ' MACs · ' + Math.round(r.fromFps) + '↓ ' + Math.round(r.toFps) + '↑ fps', l2.up ? 'good' : 'poor', null, false, null,
+      'Frames to exit ' + (l2.to_tunnel ?? 0) + ', from exit ' + (l2.from_tunnel ?? 0) + ', flooded ' + (l2.flooded ?? 0) + ', dropped (storm/limit/blocked) ' + ((l2.drop_storm || 0) + (l2.drop_mac_limit || 0) + (l2.drop_blocked || 0))));
+    topoMap.append(mapLine(hubX + w, by + h / 2, devX, by + h / 2, true));
+    topoMap.append(nodeBox(devX, by, w, h, 'Exit gateway · 10.78.0.1', 'userspace gVisor · ARP, DHCP, NAT-free', l2.up ? 'good' : 'idle'));
+  }
   const hub = hubs.find(g => g.key === selectedDevice);
   if (hub) renderAdapterCard(hub); else renderDeviceCard(all.find(d => d.key === selectedDevice));
 }
