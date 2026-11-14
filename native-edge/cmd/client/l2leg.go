@@ -100,6 +100,7 @@ func l2Status() any {
 // five seconds and never stops the tunnel.
 func startL2Bridge(ctx context.Context, c *l2BridgeConfig, classifier *bond.Classifier, submit func(bond.QueuedPacket) bool, out func(map[string]any)) {
 	l2Configured.Store(true)
+	go holdPromiscuous(ctx, c.InterfaceID, out)
 	go func() {
 		for ctx.Err() == nil {
 			io, err := openFrameIO(lan.DeviceConfig{Name: c.Name, InterfaceID: c.InterfaceID, InterfaceName: c.InterfaceName})
