@@ -56,7 +56,9 @@ func (u *routedUplink) Ready() bool { return u.ready != nil && u.ready() }
 // Submit routes by DSCP when the OMR leg is up.
 func (u *routedUplink) Submit(q bond.QueuedPacket) bool {
 	rt := u.rt.Load()
-	if rt == nil {
+	// Ethernet frames always take the bond: their first bytes are a MAC, not an IP header, so
+	// DSCP routing does not apply.
+	if rt == nil || (len(q.Payload) > 0 && q.Payload[0] == bond.L2Marker) {
 		return u.gb.Submit(q)
 	}
 	dscp := 0

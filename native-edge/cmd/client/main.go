@@ -72,6 +72,7 @@ type fileConfig struct {
 	AdaptiveQoS    json.RawMessage              `json:"adaptive_qos"`
 	ClientTunnelIP string                       `json:"client_tunnel_ip"`
 	LANDevices     json.RawMessage              `json:"lan_devices"`
+	L2Bridge       json.RawMessage              `json:"l2_bridge"` // optional: bridge one adapter onto the exit network as Ethernet frames
 	Hotspot        json.RawMessage              `json:"hotspot"`
 	LocalNetworks  json.RawMessage              `json:"local_networks"`
 	StaticRoutes   json.RawMessage              `json:"static_routes"`
@@ -463,6 +464,9 @@ func session(parent context.Context, ready func(), logOut, relayOnly io.Writer) 
 		}
 	}
 	routed := &routedUplink{deliver: func(p []byte) {
+		if deliverL2(p) {
+			return
+		}
 		if localMgr != nil && localMgr.dispatchTunnel(p) {
 			return
 		}
@@ -559,6 +563,13 @@ func session(parent context.Context, ready func(), logOut, relayOnly io.Writer) 
 		go rdns.run(ctx, c.Snapshot, func(m string) { fmt.Fprintln(logOut, m) })
 	}
 	bridge.Uplink = routed
+	l2cfg, l2err := parseL2Bridge(cfg.L2Bridge)
+	if l2err != nil {
+		return l2err
+	}
+	if l2cfg != nil {
+		startL2Bridge(ctx, l2cfg, classifier, routed.Submit, func(m map[string]any) { b, _ := json.Marshal(m); fmt.Println(string(b)) })
+	}
 	omrStatus := &omrState{mode: serverMode}
 	var meter *linkpolicy.Meter
 	if len(cfg.LinkPolicies) > 0 {
@@ -839,7 +850,7 @@ func statusDocument(cfg fileConfig, peer netip.AddrPort, created time.Time, s cl
 		"versions":  map[string]any{"client": s.ClientVersion, "server": s.ServerVersion, "server_state": s.ServerState},
 		"runtime":   runtimeStats(), "stack_write": b.Out.Timing(),
 		"packets": map[string]any{"outbound": b.Outbound.Load(), "injected": b.Injected.Load(), "dropped": b.Dropped.Load(), "malformed": b.Malformed.Load()},
-		"dish":    dishStatusDoc(), "qos": s.QoS, "link_usage": map[string]any{}, "omr": o.status(), "lan_devices": l.status(), "local_networks": localMgr.status(), "device_usage": l.usageStatus(), "lan_access": l.accessStatus(), "alarms": alarms, "loss_causes": lossCauses(s), "exit": exitStatusDoc(s.Exit)}
+		"dish":    dishStatusDoc(), "qos": s.QoS, "link_usage": map[string]any{}, "omr": o.status(), "lan_devices": l.status(), "l2_bridge": l2Status(), "local_networks": localMgr.status(), "device_usage": l.usageStatus(), "lan_access": l.accessStatus(), "alarms": alarms, "loss_causes": lossCauses(s), "exit": exitStatusDoc(s.Exit)}
 	if l != nil && l.hotspot != nil {
 		doc["hotspot"] = l.hotspot.Status(time.Now())
 	}
