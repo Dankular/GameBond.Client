@@ -59,6 +59,9 @@ func parseL2Bridge(raw json.RawMessage) (*l2BridgeConfig, error) {
 	return &c, nil
 }
 
+// l2LinkBounced is signalled when the bridged adapter's link went down and came back.
+var l2LinkBounced = make(chan struct{}, 1)
+
 var (
 	activeL2         atomic.Pointer[lan.L2Bridge]
 	l2Configured     atomic.Bool
@@ -116,7 +119,20 @@ func startL2Bridge(ctx context.Context, c *l2BridgeConfig, classifier *bond.Clas
 				activeL2.Store(b)
 				l2LastError.Store("")
 				out(map[string]any{"status": "l2_bridge_up", "name": c.Name})
-				err = b.Run(ctx)
+				// An adapter restart invalidates the driver's tap on it: the handle stays open but never
+				// delivers another frame. The promiscuous watcher signals each link-down then link-up, and
+				// the bridge reopens the adapter.
+				runCtx, stopRun := context.WithCancel(ctx)
+				go func() {
+					select {
+					case <-l2LinkBounced:
+						out(map[string]any{"status": "l2_bridge_reopen", "name": c.Name, "reason": "adapter link bounced"})
+						stopRun()
+					case <-runCtx.Done():
+					}
+				}()
+				err = b.Run(runCtx)
+				stopRun()
 				activeL2.Store(nil)
 				io.Close()
 			}

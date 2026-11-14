@@ -38,7 +38,7 @@ func holdPromiscuous(ctx context.Context, interfaceID string, out func(map[strin
 	}
 	defer closeHeld()
 	lastErr := ""
-	noAddr, pinned := 0, false
+	noAddr, pinned, wasDown := 0, false, false
 	fail := func(err error) {
 		l2Promiscuous.Store(false)
 		l2PromiscuousWhy.Store(err.Error())
@@ -49,10 +49,18 @@ func holdPromiscuous(ctx context.Context, interfaceID string, out func(map[strin
 	}
 	for ctx.Err() == nil {
 		ip, up, idx, ok := adapterState(interfaceID)
+		if ok && up && wasDown {
+			wasDown = false
+			select {
+			case l2LinkBounced <- struct{}{}:
+			default:
+			}
+		}
 		switch {
 		case !ok || !up:
 			closeHeld()
 			pinned = false
+			wasDown = true
 			fail(windows.WSAENETDOWN)
 		case fd != windows.InvalidHandle && ip == heldIP:
 			// Held and unchanged: nothing to do.
