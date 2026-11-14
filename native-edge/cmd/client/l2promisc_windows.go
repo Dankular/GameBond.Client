@@ -32,12 +32,16 @@ func holdPromiscuous(ctx context.Context, interfaceID string, out func(map[strin
 		// every few seconds; the old socket is closed only after the new one is on.
 		fd, err := rcvAllOn(interfaceID)
 		if err != nil {
+			l2Promiscuous.Store(false)
+			l2PromiscuousWhy.Store(err.Error())
 			if err.Error() != lastErr {
 				out(map[string]any{"status": "l2_promiscuous_failed", "reason": err.Error()})
 			}
 			lastErr = err.Error()
 		} else {
 			lastErr = ""
+			l2Promiscuous.Store(true)
+			l2PromiscuousWhy.Store("")
 			if prev != windows.InvalidHandle {
 				windows.Closesocket(prev)
 			}

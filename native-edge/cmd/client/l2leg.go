@@ -60,10 +60,12 @@ func parseL2Bridge(raw json.RawMessage) (*l2BridgeConfig, error) {
 }
 
 var (
-	activeL2     atomic.Pointer[lan.L2Bridge]
-	l2Configured atomic.Bool
-	l2Orphans    atomic.Uint64 // L2 payloads that arrived while no bridge was up
-	l2LastError  atomic.Value  // string
+	activeL2         atomic.Pointer[lan.L2Bridge]
+	l2Configured     atomic.Bool
+	l2Promiscuous    atomic.Bool   // the adapter's hardware receive filter is held open
+	l2PromiscuousWhy atomic.Value  // string: why it is not
+	l2Orphans        atomic.Uint64 // L2 payloads that arrived while no bridge was up
+	l2LastError      atomic.Value  // string
 )
 
 // deliverL2 hands an L2 payload to the running bridge. It reports whether the payload was L2, so
@@ -89,6 +91,10 @@ func l2Status() any {
 	if b := activeL2.Load(); b != nil {
 		st = b.Stats()
 		st["up"], st["orphans"] = true, l2Orphans.Load()
+	}
+	st["promiscuous"] = l2Promiscuous.Load()
+	if why, _ := l2PromiscuousWhy.Load().(string); why != "" {
+		st["promiscuous_error"] = why
 	}
 	if e, _ := l2LastError.Load().(string); e != "" {
 		st["error"] = e

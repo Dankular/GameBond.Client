@@ -1,6 +1,7 @@
 package lan
 
 import (
+	"fmt"
 	"context"
 	"sync"
 	"sync/atomic"
@@ -39,6 +40,7 @@ type L2Bridge struct {
 	mu                               sync.Mutex
 	toTunnel, fromTunnel, oversize   atomic.Uint64
 	queueFull, switchDrops, writeErr atomic.Uint64
+	trace                            l2Trace
 }
 
 // NewL2Bridge builds the bridge. submit queues a payload for the bond; classifier gives frames
@@ -83,7 +85,13 @@ func (b *L2Bridge) FromAdapter(frame []byte) {
 		b.oversize.Add(1)
 		fwd, back, ok := oversizeIPv4(frame, b.cfg.FrameMTU)
 		if !ok {
+			b.trace.note("drop-oversize", frame)
 			return
+		}
+		if len(back) > 0 {
+			b.trace.note("icmp-frag-needed", frame)
+		} else {
+			b.trace.note("fragmented", frame)
 		}
 		for _, f := range back {
 			b.io.Write(padWire(f))
@@ -96,6 +104,7 @@ func (b *L2Bridge) FromAdapter(frame []byte) {
 	v := b.sw.Forward(L2PortLAN, frame, now)
 	if v.Drop != bond.L2Forward {
 		b.switchDrops.Add(1)
+		b.trace.note(fmt.Sprintf("drop-switch-%v", v.Drop), frame)
 		return
 	}
 	for _, out := range v.Out {
@@ -105,6 +114,7 @@ func (b *L2Bridge) FromAdapter(frame []byte) {
 		c, _, err := b.classifier.ClassifyFrame(frame, now)
 		if err != nil {
 			b.switchDrops.Add(1)
+			b.trace.note("drop-classify", frame)
 			return
 		}
 		q := bond.QueuedPacket{Payload: bond.WrapFrame(frame), Flow: c.Info.Flow, Priority: c.Policy.Priority,
@@ -114,8 +124,10 @@ func (b *L2Bridge) FromAdapter(frame []byte) {
 		}
 		if b.submit(q) {
 			b.toTunnel.Add(1)
+			b.trace.note("up", frame)
 		} else {
 			b.queueFull.Add(1)
+			b.trace.note("drop-queue-full", frame)
 		}
 	}
 }
@@ -141,6 +153,7 @@ func (b *L2Bridge) Deliver(payload []byte) bool {
 	v := b.sw.Forward(L2PortTunnel, frame, b.now())
 	if v.Drop != bond.L2Forward {
 		b.switchDrops.Add(1)
+		b.trace.note(fmt.Sprintf("down-drop-switch-%v", v.Drop), frame)
 		return true
 	}
 	for _, out := range v.Out {
@@ -155,9 +168,11 @@ func (b *L2Bridge) Deliver(payload []byte) bool {
 		}
 		if err := b.io.Write(wire); err != nil {
 			b.writeErr.Add(1)
+			b.trace.note("down-write-error", frame)
 			continue
 		}
 		b.fromTunnel.Add(1)
+		b.trace.note("down", frame)
 	}
 	return true
 }
@@ -165,10 +180,14 @@ func (b *L2Bridge) Deliver(payload []byte) bool {
 // Stats is the panel view.
 func (b *L2Bridge) Stats() map[string]any {
 	st := b.sw.Stats()
-	return map[string]any{
+	m := map[string]any{
 		"name": b.cfg.Name, "to_tunnel": b.toTunnel.Load(), "from_tunnel": b.fromTunnel.Load(),
 		"oversize": b.oversize.Load(), "queue_full": b.queueFull.Load(), "switch_drops": b.switchDrops.Load(), "write_errors": b.writeErr.Load(),
 		"fdb_size": st.FDBSize, "learned": st.Learned, "moves": st.Moves, "flooded": st.Flooded, "forwarded": st.Forwarded,
 		"drop_storm": st.DropStorm, "drop_mac_limit": st.DropMACLimit, "drop_blocked": st.DropBlocked, "loop_holds": st.LoopHolds,
 	}
+	for k, v := range b.trace.snapshot() {
+		m[k] = v
+	}
+	return m
 }
