@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"context"
 	"errors"
 	"fmt"
@@ -46,7 +47,9 @@ func startStreamTransport(stack *netstack.Net) {
 	// Opt in only (GAMEBOND_STREAM=1): the client crashed (gVisor buffer pool fault) within
 	// minutes of making this the default, so it stays off until that is understood.
 	if os.Getenv("GAMEBOND_STREAM") != "1" {
-		return
+		if _, err := os.Stat(filepath.Join(".runtime", "enable-stream")); err != nil { // flag file: no process env needed
+			return
+		}
 	}
 	gw := netip.MustParseAddrPort("10.77.0.1:4436")
 	c, err := stack.DialUDPAddrPort(netip.AddrPort{}, gw)
