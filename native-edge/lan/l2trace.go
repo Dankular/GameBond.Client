@@ -122,6 +122,10 @@ func describeFrame(f []byte) (class, desc string) {
 					}
 					flags = " [" + flags + "]"
 				}
+				if ip[9] == 17 && (sp == 53 || dp == 53) && len(f) >= 14+ihl+8+12 {
+					name = "udp-dns"
+					flags = " " + describeDNS(ip[ihl+8:min(len(ip), int(binary.BigEndian.Uint16(ip[2:])))], sp == 53)
+				}
 				return "ipv4-" + name, head + fmt.Sprintf("%s %s:%d>%s:%d%s%s", name, src, sp, dst, dp, flags, extra)
 			}
 		case 1:
@@ -135,4 +139,52 @@ func describeFrame(f []byte) (class, desc string) {
 	default:
 		return fmt.Sprintf("ethertype-%04x", et), head + fmt.Sprintf("ethertype %04x", et)
 	}
+}
+
+// describeDNS summarises a DNS message: the question, and for a response the result code and answers.
+func describeDNS(m []byte, response bool) string {
+	if len(m) < 12 {
+		return "dns short"
+	}
+	flags := binary.BigEndian.Uint16(m[2:])
+	an := binary.BigEndian.Uint16(m[6:])
+	name, off := "", 12
+	for off < len(m) {
+		l := int(m[off])
+		if l == 0 {
+			off++
+			break
+		}
+		if l&0xc0 != 0 || off+1+l > len(m) {
+			return "dns?"
+		}
+		if name != "" {
+			name += "."
+		}
+		name += string(m[off+1 : off+1+l])
+		off += 1 + l
+	}
+	qt := uint16(0)
+	if off+2 <= len(m) {
+		qt = binary.BigEndian.Uint16(m[off:])
+	}
+	types := map[uint16]string{1: "A", 5: "CNAME", 28: "AAAA", 65: "HTTPS", 15: "MX", 16: "TXT", 12: "PTR", 33: "SRV"}
+	t := types[qt]
+	if t == "" {
+		t = fmt.Sprintf("type%d", qt)
+	}
+	if !response {
+		return fmt.Sprintf("Q %s %s", t, name)
+	}
+	rc := []string{"NOERROR", "FORMERR", "SERVFAIL", "NXDOMAIN", "NOTIMP", "REFUSED"}
+	r := int(flags & 0xf)
+	rs := fmt.Sprintf("rcode%d", r)
+	if r < len(rc) {
+		rs = rc[r]
+	}
+	tc := ""
+	if flags&0x0200 != 0 {
+		tc = " TRUNCATED"
+	}
+	return fmt.Sprintf("A %s %s %s answers=%d%s", t, name, rs, an, tc)
 }
