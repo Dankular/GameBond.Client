@@ -13,7 +13,7 @@ require (
 )
 
 require (
-	github.com/Dankular/GameBond.Core v0.1.26
+	github.com/Dankular/GameBond.Core v0.1.27
 	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c
 )
 
