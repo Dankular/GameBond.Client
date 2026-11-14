@@ -11,6 +11,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// sioRcvAll is SIO_RCVALL = _WSAIOW(IOC_VENDOR, 1).
+const sioRcvAll = 0x98000001
+
 // holdPromiscuous keeps the bridged adapter's hardware receive filter open. The bridge speaks as
 // virtual MACs (the exit gateway's 02:47:42:..), and a NIC drops unicast frames for any MAC it does
 // not own, so without this the devices' ARP and DHCP broadcasts arrive but every unicast frame
@@ -71,7 +74,7 @@ func rcvAllOnce(ctx context.Context, interfaceID string) error {
 	}
 	on := uint32(1) // RCVALL_ON
 	var n uint32
-	if err := windows.WSAIoctl(fd, windows.SIO_RCVALL, (*byte)(unsafe.Pointer(&on)), 4, nil, 0, &n, nil, 0); err != nil {
+	if err := windows.WSAIoctl(fd, sioRcvAll, (*byte)(unsafe.Pointer(&on)), 4, nil, 0, &n, nil, 0); err != nil {
 		return err
 	}
 	// The socket must stay open while the bridge runs; drain it so Windows never queues the copies.
