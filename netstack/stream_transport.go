@@ -43,9 +43,9 @@ func (u udpAdapter) WriteTo(p []byte, _ net.Addr) (int, error) { return u.c.Writ
 func (u udpAdapter) Close() error                              { return u.c.Close() }
 
 func startStreamTransport(stack *netstack.Net) {
-	// On by default with the model-based congestion controller (Core v0.1.32). GAMEBOND_STREAM=0
-	// falls back to plain gVisor TCP; the previous controller capped one download near 2 MB/s.
-	if os.Getenv("GAMEBOND_STREAM") == "0" {
+	// Opt in only (GAMEBOND_STREAM=1): the client crashed (gVisor buffer pool fault) within
+	// minutes of making this the default, so it stays off until that is understood.
+	if os.Getenv("GAMEBOND_STREAM") != "1" {
 		return
 	}
 	gw := netip.MustParseAddrPort("10.77.0.1:4436")
