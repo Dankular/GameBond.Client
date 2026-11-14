@@ -43,8 +43,9 @@ func (u udpAdapter) WriteTo(p []byte, _ net.Addr) (int, error) { return u.c.Writ
 func (u udpAdapter) Close() error                              { return u.c.Close() }
 
 func startStreamTransport(stack *netstack.Net) {
-	if _, err := os.Stat(`D:\Dev Proj\Speedify\.runtime
-o-stream`); err == nil || os.Getenv("GAMEBOND_STREAM") == "0" {
+	// Opt in only: measured 2026-11-12 the stream transport caps one download near 2 MB/s
+	// (plain gVisor TCP gives 8-10 MB/s, no loss), which drains a streaming player's buffer.
+	if os.Getenv("GAMEBOND_STREAM") != "1" {
 		return
 	}
 	gw := netip.MustParseAddrPort("10.77.0.1:4436")
