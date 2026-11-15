@@ -24,6 +24,41 @@ func TestL2BridgeConfigIsOptInAndValidated(t *testing.T) {
 	}
 }
 
+func TestL2BridgeConfigEgressTagOverhead(t *testing.T) {
+	qinq, err := parseL2Bridge(json.RawMessage(`{"enabled":true,"interface_name":"eth0","tunnel_vlan":{"service_vlan":100,"allowed_customer_vlans":[10,20]}}`))
+	if err != nil || qinq.EgressTagOverhead() != 8 {
+		t.Fatalf("Q-in-Q trunk overhead=%v err=%v", qinq, err)
+	}
+	customerAccess, err := parseL2Bridge(json.RawMessage(`{"enabled":true,"interface_name":"eth0","lan_vlan":{"service_vlan":100,"customer_vlan":10}}`))
+	if err != nil || customerAccess.EgressTagOverhead() != 0 {
+		t.Fatalf("customer access should strip tags: %v err=%v", customerAccess, err)
+	}
+	singleTag, err := parseL2Bridge(json.RawMessage(`{"enabled":true,"interface_name":"eth0","lan_vlan":{"allowed_vlans":[10]}}`))
+	if err != nil || singleTag.EgressTagOverhead() != 4 {
+		t.Fatalf("single-tag trunk overhead=%v err=%v", singleTag, err)
+	}
+}
+
+func TestTunnelClientMTUIncludesL2EgressTagRoom(t *testing.T) {
+	outerMTU := 1400
+	base := outerMTU + bond.Overhead + 24
+	for _, test := range []struct {
+		name string
+		cfg  *l2BridgeConfig
+		want int
+	}{
+		{name: "bridge disabled", want: base},
+		{name: "single tag", cfg: &l2BridgeConfig{LANVLAN: bond.L2VLANPolicy{AllowedVLANs: []uint16{10}}}, want: base + 4},
+		{name: "qinq", cfg: &l2BridgeConfig{TunnelVLAN: bond.L2VLANPolicy{ServiceVLAN: 100, AllowedCustomerVLANs: []uint16{10}}}, want: base + 8},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := tunnelClientMTU(outerMTU, test.cfg); got != test.want {
+				t.Fatalf("client MTU=%d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
 func TestL2PayloadsNeverReachTheIPStack(t *testing.T) {
 	if deliverL2([]byte{0x45, 0, 0, 20}) {
 		t.Fatal("IPv4 taken as L2")

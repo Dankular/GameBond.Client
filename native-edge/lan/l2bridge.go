@@ -1,8 +1,8 @@
 package lan
 
 import (
-	"fmt"
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,6 +22,7 @@ type L2BridgeConfig struct {
 	Name                                          string
 	FrameMTU                                      int // largest frame carried (default bond.DefaultL2FrameMTU)
 	MACLimit                                      int // learned MACs allowed behind the adapter (0 = unlimited)
+	TunnelVLAN, LANVLAN                           bond.L2VLANPolicy
 	BroadcastPPS, MulticastPPS, UnknownUnicastPPS float64
 }
 
@@ -50,10 +51,11 @@ func NewL2Bridge(cfg L2BridgeConfig, io FrameIO, classifier *bond.Classifier, su
 	if cfg.FrameMTU <= 0 {
 		cfg.FrameMTU = bond.DefaultL2FrameMTU
 	}
+	cfg.FrameMTU += max(cfg.TunnelVLAN.EgressTagOverhead(), cfg.LANVLAN.EgressTagOverhead())
 	return &L2Bridge{cfg: cfg, io: io, classifier: classifier, submit: submit, now: time.Now,
 		sw: bond.NewL2Switch(bond.L2SwitchConfig{Ports: []bond.L2PortConfig{
-			{ID: L2PortTunnel, Name: "bond"},
-			{ID: L2PortLAN, Name: cfg.Name, MACLimit: cfg.MACLimit, BroadcastPPS: cfg.BroadcastPPS, MulticastPPS: cfg.MulticastPPS, UnknownUnicastPPS: cfg.UnknownUnicastPPS},
+			{ID: L2PortTunnel, Name: "bond", VLAN: cfg.TunnelVLAN},
+			{ID: L2PortLAN, Name: cfg.Name, MACLimit: cfg.MACLimit, BroadcastPPS: cfg.BroadcastPPS, MulticastPPS: cfg.MulticastPPS, UnknownUnicastPPS: cfg.UnknownUnicastPPS, VLAN: cfg.LANVLAN},
 		}})}
 }
 
@@ -83,9 +85,10 @@ func (b *L2Bridge) Run(ctx context.Context) error {
 // FromAdapter handles one frame the device sent.
 func (b *L2Bridge) FromAdapter(frame []byte) {
 	now := b.now()
-	if len(frame) > b.cfg.FrameMTU {
+	frameMTU := b.tunnelFrameMTU(frame)
+	if len(frame) > frameMTU {
 		b.oversize.Add(1)
-		fwd, back, ok := oversizeIPv4(frame, b.cfg.FrameMTU)
+		fwd, back, ok := oversizeIPv4(frame, frameMTU)
 		if !ok {
 			b.trace.note("drop-oversize", frame)
 			return
@@ -113,13 +116,19 @@ func (b *L2Bridge) FromAdapter(frame []byte) {
 		if out != L2PortTunnel {
 			continue
 		}
-		c, _, err := b.classifier.ClassifyFrame(frame, now)
+		outFrame := v.FrameFor(out, frame)
+		if len(outFrame) > b.cfg.FrameMTU {
+			b.oversize.Add(1)
+			b.trace.note("drop-oversize-up", outFrame)
+			continue
+		}
+		c, _, err := b.classifier.ClassifyFrame(outFrame, now)
 		if err != nil {
 			b.switchDrops.Add(1)
 			b.trace.note("drop-classify", frame)
 			return
 		}
-		q := bond.QueuedPacket{Payload: bond.WrapFrame(frame), Flow: c.Info.Flow, Priority: c.Policy.Priority,
+		q := bond.QueuedPacket{Payload: bond.WrapFrame(outFrame), Flow: c.Info.Flow, Priority: c.Policy.Priority,
 			Replicate: c.Policy.Replicate, Tag: c.Tag, ClassCapacity: c.Policy.Capacity, Expires: now.Add(5 * time.Second)}
 		if c.Policy.MaxAgeMS > 0 {
 			q.Expires = now.Add(time.Duration(c.Policy.MaxAgeMS * float64(time.Millisecond)))
@@ -132,6 +141,17 @@ func (b *L2Bridge) FromAdapter(frame []byte) {
 			b.trace.note("drop-queue-full", frame)
 		}
 	}
+}
+
+func (b *L2Bridge) tunnelFrameMTU(frame []byte) int {
+	tagGrowth := b.cfg.TunnelVLAN.EgressTagOverhead()
+	if info, err := bond.ParseFrame(frame); err == nil {
+		tagGrowth -= int(info.VLANDepth) * 4
+	}
+	if tagGrowth < 0 {
+		tagGrowth = 0
+	}
+	return b.cfg.FrameMTU - tagGrowth
 }
 
 // minWireFrame is the size frames are padded to before they reach the adapter.
@@ -152,6 +172,11 @@ func (b *L2Bridge) Deliver(payload []byte) bool {
 	if !ok {
 		return false
 	}
+	if len(frame) > b.cfg.FrameMTU {
+		b.oversize.Add(1)
+		b.trace.note("drop-oversize-down", frame)
+		return true
+	}
 	v := b.sw.Forward(L2PortTunnel, frame, b.now())
 	if v.Drop != bond.L2Forward {
 		b.switchDrops.Add(1)
@@ -162,9 +187,15 @@ func (b *L2Bridge) Deliver(payload []byte) bool {
 		if out != L2PortLAN {
 			continue
 		}
+		outFrame := v.FrameFor(out, frame)
+		if len(outFrame) > b.cfg.FrameMTU {
+			b.oversize.Add(1)
+			b.trace.note("drop-oversize-down", outFrame)
+			continue
+		}
 		// A NIC pads runt frames in hardware; the raw driver write does not, and devices never saw
 		// the 42-byte ARP replies. Pad here, at the adapter, so the exit stays a pure stack.
-		wire := frame
+		wire := outFrame
 		if len(wire) < minWireFrame {
 			wire = append(append(make([]byte, 0, minWireFrame), wire...), make([]byte, minWireFrame-len(wire))...)
 		}
@@ -181,6 +212,31 @@ func (b *L2Bridge) Deliver(payload []byte) bool {
 
 // FramesRead is how many frames the adapter has delivered to the bridge since it opened.
 func (b *L2Bridge) FramesRead() uint64 { return b.read.Load() }
+
+// BridgedDevice is one MAC address learned behind the bridged adapter.
+type BridgedDevice struct {
+	MAC     string `json:"mac"`
+	VLAN    uint16 `json:"vlan,omitempty"`
+	AgeSecs int    `json:"age_secs"`
+}
+
+// Devices lists the MACs currently learned on the LAN-facing port, excluding the bond/tunnel
+// side's own FDB entries. Used to show individual connected devices in the topology view.
+func (b *L2Bridge) Devices() []BridgedDevice {
+	entries := b.sw.FDBEntries()
+	out := make([]BridgedDevice, 0, len(entries))
+	for _, e := range entries {
+		if e.Port != L2PortLAN {
+			continue
+		}
+		out = append(out, BridgedDevice{
+			MAC:     fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", e.MAC[0], e.MAC[1], e.MAC[2], e.MAC[3], e.MAC[4], e.MAC[5]),
+			VLAN:    e.VLAN,
+			AgeSecs: int(e.Age.Seconds()),
+		})
+	}
+	return out
+}
 
 // Stats is the panel view.
 func (b *L2Bridge) Stats() map[string]any {

@@ -31,7 +31,7 @@ go -C netstack build -o ../build/gamebond-netstack.exe .
 ```
 
 Configure `configs/local-client.json` from [the example](configs/client.example.json).
-Optional transport flags (`failover_replay`, `flow_pinning`, `codel`, `loss_tracking`, `delay_control`)
+Optional transport flags (`failover_replay`, `flow_pinning`, `codel`, `loss_tracking`, `delay_control`, `lab_mode`)
 are described in [FEATURES.md](FEATURES.md); set the same ones on the server.
 Choose **Connect** in the widget. Closing the window hides it in the tray;
 **Quit (stop tunnel)** exits. `build\gamebond-desktopctl.exe status|ensure|connect|stop -root .`

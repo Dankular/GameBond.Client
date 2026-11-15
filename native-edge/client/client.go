@@ -15,9 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Dankular/GameBond.Core/bond"
 	"gamebond.local/nativeedge/carrier"
 	"gamebond.local/nativeedge/uplink"
+	"github.com/Dankular/GameBond.Core/bond"
 )
 
 // spinWindow is how close to the next paced release the loop stops sleeping.
@@ -57,6 +57,8 @@ type Config struct {
 	QoS *bond.QoSSettings
 	// LossTracking sends replicated packets as DATA_COPY (config loss_tracking).
 	LossTracking bool
+	// LabMode disables adaptive loss protection and jitter-based reordering.
+	LabMode bool
 	// DelayControl cuts a path's bulk rate when a standing queue builds (config delay_control).
 	DelayControl bool
 	// Backups are standby exit servers tried, in order, when Server stops answering (see failover.go).
@@ -264,7 +266,9 @@ func (c *Client) OpenOutageLog(dir string) error {
 func (c *Client) NoteComponent(source string, ok bool, note string) {
 	c.receiver().NoteComponent(source, ok, note)
 }
-func (c *Client) NoteComponentError(source, note string) { c.receiver().NoteComponentError(source, note) }
+func (c *Client) NoteComponentError(source, note string) {
+	c.receiver().NoteComponentError(source, note)
+}
 
 // CloseOutageLog flushes and stops the durable outage log.
 func (c *Client) CloseOutageLog() {

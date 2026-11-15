@@ -15,6 +15,7 @@
   "bonding_max_rate_mbps": 100,
   "reorder_timeout_ms": 30,
   "loss_tracking": false,
+  "lab_mode": false,
   "path_mtu_discovery": false,
   "failover_replay": false,
   "repair_deadline_ms": 250,

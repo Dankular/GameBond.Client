@@ -69,6 +69,110 @@ const topoCard = element('div');
 const topoPies = element('div', null, { class: 'topo-pies' });
 topoPane.append(topoHead, topoStats, topoMap, topoPies, topoCard);
 
+// A small authoring surface built from the same SVG and node-card primitives as
+// the live map. Desired state is saved by the server portal, never in the status view.
+const labStyle = document.createElement('style');
+labStyle.textContent = '.lab-editor{margin:18px 0;padding:14px;border:1px solid #d9dfe7;border-radius:10px}.lab-toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}.lab-toolbar button,.lab-editor button{cursor:pointer}.lab-canvas{width:100%;height:auto;min-height:300px;border:1px solid #e1e5eb;border-radius:8px;background-color:#fbfcfe;background-image:radial-gradient(#dce2ea 1px,transparent 1px);background-size:18px 18px;touch-action:none}.lab-node{cursor:grab}.lab-node:active{cursor:grabbing}.lab-selected rect{stroke:#0f7ae5;stroke-width:3}.lab-props{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}.lab-props input,.lab-props select{padding:6px;border:1px solid #cfd5dd;border-radius:5px}.lab-msg{margin:8px 0;color:#505762;min-height:1.2em}.lab-msg.error{color:#a8120e}.lab-link{stroke:#687486;stroke-width:3;cursor:pointer}.lab-link.sel{stroke:#0f7ae5;stroke-width:5}.lab-help{font-size:12px;color:#7b8089}';
+document.head.append(labStyle);
+const labEditor = element('section', null, { class: 'lab-editor' });
+labEditor.append(element('h2', 'Lab topology designer'));
+const labToolbar = element('div', null, { class: 'lab-toolbar' });
+const labNew = element('button', 'New topology'), labAddHost = element('button', 'Add host'), labAddRouter = element('button', 'Add router'), labAddSwitch = element('button', 'Add switch'), labLinkMode = element('button', 'Draw link'), labAddCheck = element('button', 'Add ping check'), labRunChecks = element('button', 'Run checks'), labSave = element('button', 'Save'), labLoad = element('button', 'Load saved'), labApply = element('button', 'Apply'), labRollback = element('button', 'Rollback');
+const labName = document.createElement('input'); labName.placeholder = 'Topology name'; labName.value = 'New lab'; labName.maxLength = 128;
+const labToolbarStatus = element('span', '', { class: 'lab-help' });
+labToolbar.append(labName, labNew, labAddHost, labAddRouter, labAddSwitch, labLinkMode, labAddCheck, labRunChecks, labSave, labLoad, labApply, labRollback, labToolbarStatus);
+const labCanvas = svg('svg', { class: 'lab-canvas', viewBox: '0 0 1060 460', role: 'group', 'aria-label': 'Editable lab topology' });
+const labAssertions = element('div', null, { class: 'lab-toolbar' }), labProps = element('div', null, { class: 'lab-props' }), labMessage = element('div', null, { class: 'lab-msg', role: 'status' });
+labEditor.append(labToolbar, labCanvas, labAssertions, labProps, labMessage, element('p', 'Choose Draw link, then select two nodes. Drag nodes to arrange them. Impairments apply in real time when the lab runtime is available.', { class: 'lab-help' }));
+topoPane.append(labEditor);
+let labTopology = { version: 1, id: 'new-lab', name: 'New lab', nodes: [], links: [] }, labSelected = null, labMode = 'select', labLinkStart = null, labDrag = null, labRuntimeStatus = null;
+const labInterfaceFaults = new Map();
+function labSay(message, error = false) { labMessage.textContent = message; labMessage.classList.toggle('error', error); }
+function labFreshID(prefix, used) { let n = 1, id = prefix + '-' + n; while (used.has(id)) id = prefix + '-' + (++n); return id; }
+function labAddNode(role) {
+  const nodeID = labFreshID(role, new Set(labTopology.nodes.map(n => n.id)));
+  const daemons = role === 'router' ? ['frr'] : role === 'switch' ? ['mstpd'] : [];
+  const node = { id: nodeID, name: role[0].toUpperCase() + role.slice(1) + ' ' + (labTopology.nodes.length + 1), role, interfaces: [{ id: 'eth0', name: 'eth0', addresses: [] }], daemons, daemon_config: {}, position: { x: 100 + (labTopology.nodes.length % 4) * 230, y: 80 + Math.floor(labTopology.nodes.length / 4) * 130 } };
+  labTopology.nodes.push(node); labSelected = { kind: 'node', id: node.id }; labMode = 'select'; labRender();
+}
+function labInterface(node) {
+  const used = new Set(labTopology.links.flatMap(l => [l.a, l.b]).filter(e => e.node === node.id).map(e => e.interface));
+  let i = 0, id; do { id = 'eth' + i++; } while (used.has(id));
+  const found = node.interfaces.find(x => x.id === id);
+  if (!found) node.interfaces.push({ id, name: id });
+  return id;
+}
+function labRender() {
+  labTopology.name = labName.value || labTopology.name;
+  labCanvas.replaceChildren();
+  for (const link of labTopology.links) {
+    const a = labTopology.nodes.find(n => n.id === link.a.node), b = labTopology.nodes.find(n => n.id === link.b.node); if (!a || !b) continue;
+    const line = svg('line', { x1: a.position.x + 70, y1: a.position.y + 32, x2: b.position.x + 70, y2: b.position.y + 32, class: 'lab-link' + (labSelected?.kind === 'link' && labSelected.id === link.id ? ' sel' : '') });
+    const linkStats = labRuntimeStatus?.links?.[link.id] || {}, rate = Number(linkStats.bps ?? linkStats.tx_bps ?? linkStats.bytes_per_second * 8) || 0;
+    line.style.strokeWidth = String(2 + 5 * flowIntensity(rate));
+    if (linkStats.up === false) line.style.stroke = '#e0201b'; else if (rate > 0) line.style.stroke = '#0f7ae5';
+    line.onclick = () => { labSelected = { kind: 'link', id: link.id }; labRender(); }; labCanvas.append(line);
+    labCanvas.append(svg('text', { x: (a.position.x + b.position.x) / 2 + 60, y: (a.position.y + b.position.y) / 2 + 20, 'font-size': 11, 'text-anchor': 'middle', fill: '#505762' }, (link.impairment?.latency_ms || 0) + ' ms · ' + (link.impairment?.loss_pct || 0) + '% loss'));
+  }
+  for (const node of labTopology.nodes) {
+    const g = nodeBox(node.position.x, node.position.y, 140, 64, node.name, node.role + ' · ' + node.interfaces.length + ' ports', 'idle', null, labSelected?.kind === 'node' && labSelected.id === node.id);
+    g.classList.add('lab-node'); g.setAttribute('data-id', node.id);
+    g.onpointerdown = e => { e.preventDefault(); if (labMode === 'link') { if (!labLinkStart) { labLinkStart = node.id; labSay('Select the second node to connect.'); } else if (labLinkStart !== node.id) { const other = labTopology.nodes.find(n => n.id === labLinkStart); const id = labFreshID('link', new Set(labTopology.links.map(x => x.id))); labTopology.links.push({ id, a: { node: other.id, interface: labInterface(other) }, b: { node: node.id, interface: labInterface(node) }, impairment: { latency_ms: 0, jitter_ms: 0, loss_pct: 0, bandwidth_bps: 0 } }); labSelected = { kind: 'link', id }; labLinkStart = null; labMode = 'select'; labSay('Link created.'); labRender(); } return; } const pt = labCanvas.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY; const p = pt.matrixTransform(labCanvas.getScreenCTM().inverse()); labDrag = { id: node.id, dx: p.x - node.position.x, dy: p.y - node.position.y }; labSelected = { kind: 'node', id: node.id }; labCanvas.setPointerCapture(e.pointerId); labRender(); };
+    labCanvas.append(g);
+  }
+  labAssertions.replaceChildren();
+  for (const assertion of (labTopology.assertions || [])) { const b = element('button', assertion.kind + ': ' + assertion.target); b.classList.toggle('active', labSelected?.kind === 'assertion' && labSelected.id === assertion.id); b.onclick = () => { labSelected = { kind: 'assertion', id: assertion.id }; labRender(); }; labAssertions.append(b); }
+  labProps.replaceChildren();
+  if (labSelected?.kind === 'node') {
+    const n = labTopology.nodes.find(x => x.id === labSelected.id);
+    if (n) { const name = document.createElement('input'); name.value = n.name; name.setAttribute('aria-label', 'Node name'); name.onchange = () => { n.name = name.value.trim() || n.id; labRender(); };
+      const role = document.createElement('select'); for (const v of ['host', 'router', 'switch']) role.append(new Option(v, v)); role.value = n.role; role.onchange = () => { n.role = role.value; labRender(); };
+      const restart = element('button', 'Restart node'); restart.onclick = async () => { try { await api('labs', 'POST', { action: 'restart-node', node: n.id }); labSay('Node restart requested.'); await labRefresh(); } catch (e) { labSay(e.message, true); } };
+      const nodeState = labRuntimeStatus?.nodes?.[n.id]; const nodeMetrics = nodeState ? 'CPU ' + (Number(nodeState.cpu_percent) || 0).toFixed(1) + '% · memory ' + bytes(Number(nodeState.memory_usage_bytes) || 0) + ' / ' + bytes(Number(nodeState.memory_limit_bytes) || 0) : 'No live telemetry'; labProps.append(element('strong', 'Node'), name, role, element('span', n.interfaces.length + ' interfaces' + (nodeState?.state ? ' · ' + nodeState.state : '')), element('span', nodeMetrics), restart);
+      const daemonLabel = element('strong', 'Daemons'); labProps.append(daemonLabel);
+      const enabledDaemons = new Set(n.daemons || []);
+      for (const daemon of ['frr', 'mstpd', 'keepalived', 'hostapd', 'wpa_supplicant', 'snmpd', 'sflow']) { const label = document.createElement('label'), checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = enabledDaemons.has(daemon); checkbox.onchange = () => { n.daemons ||= []; n.daemons = checkbox.checked ? [...new Set([...n.daemons, daemon])] : n.daemons.filter(x => x !== daemon); if (!checkbox.checked) delete n.daemon_config?.[daemon]; labRender(); }; label.append(checkbox, document.createTextNode(daemon)); labProps.append(label); }
+      n.daemon_config ||= {};
+      for (const iface of n.interfaces) { const ifaceLabel = element('strong', 'Interface ' + iface.id); const addr = document.createElement('input'); addr.value = (iface.addresses || []).join(', '); addr.placeholder = 'Addresses, e.g. 10.0.0.1/24'; addr.onchange = () => { iface.addresses = addr.value.split(',').map(x => x.trim()).filter(Boolean); };
+        const mac = document.createElement('input'); mac.value = iface.mac || ''; mac.placeholder = 'MAC address (optional)'; mac.onchange = () => { if (mac.value.trim()) iface.mac = mac.value.trim(); else delete iface.mac; };
+        const mtu = document.createElement('input'); mtu.type = 'number'; mtu.min = '576'; mtu.max = '65535'; mtu.placeholder = 'MTU'; mtu.value = iface.mtu || ''; mtu.onchange = () => { if (Number(mtu.value)) iface.mtu = Number(mtu.value); else delete iface.mtu; };
+        const faultKey=n.id+'/'+iface.id, fault=labInterfaceFaults.get(faultKey)||{loss_pct:0,corrupt_pct:0};
+        const errorRate=document.createElement('input');errorRate.type='number';errorRate.min='0';errorRate.max='100';errorRate.step='0.1';errorRate.value=fault.loss_pct||0;errorRate.setAttribute('aria-label','Interface packet loss percent');
+        const corrupt=document.createElement('input');corrupt.type='number';corrupt.min='0';corrupt.max='100';corrupt.step='0.1';corrupt.value=fault.corrupt_pct||0;corrupt.setAttribute('aria-label','Interface packet corruption percent');
+        const inject=element('button','Inject interface errors');inject.onclick=async()=>{const selected={loss_pct:Number(errorRate.value)||0,corrupt_pct:Number(corrupt.value)||0};labInterfaceFaults.set(faultKey,selected);try{await api('labs','POST',{action:'interface-errors',node:n.id,interface:iface.id,impairment:selected});labSay('Interface errors applied.');await labRefresh();}catch(e){labSay(e.message,true);}};
+        labProps.append(ifaceLabel, addr, mac, mtu, element('label','Loss % '),errorRate,element('label','Corruption % '),corrupt,inject); }
+      const addIface = element('button', 'Add interface'); addIface.onclick = () => { const id = labFreshID('eth', new Set(n.interfaces.map(x => x.id))); n.interfaces.push({ id, name: id, addresses: [] }); labRender(); }; labProps.append(addIface);
+      for (const daemon of n.daemons || []) { const label = element('strong', daemon + ' configuration'); const area = document.createElement('textarea'); area.rows = 5; area.cols = 56; area.value = n.daemon_config[daemon] || ''; area.setAttribute('aria-label', daemon + ' config'); area.onchange = () => { if (area.value) n.daemon_config[daemon] = area.value; else delete n.daemon_config[daemon]; }; labProps.append(label, area); }
+    }
+  } else if (labSelected?.kind === 'link') {
+    const l = labTopology.links.find(x => x.id === labSelected.id);
+    if (l) { const inp = (label, field, type, max) => { const wrap = element('label', label + ' '); const v = document.createElement('input'); v.type = 'number'; v.min = '0'; v.max = String(max); v.step = type === 'number' ? '0.1' : '1'; v.value = l.impairment[field] || 0; v.onchange = () => { l.impairment[field] = type === 'number' ? Number(v.value) : Math.round(Number(v.value)); labRender(); }; wrap.append(v); return wrap; };
+      const toggle = element('button', 'Toggle link up/down'); toggle.onclick = async () => { const action = labRuntimeStatus?.links?.[l.id]?.up === false ? 'link-up' : 'link-down'; try { await api('labs', 'POST', { action, link: l.id }); labSay('Link state changed.'); await labRefresh(); } catch (e) { labSay(e.message, true); } };
+      const flap = element('button', 'Flap link (1 s)'); flap.onclick = async () => { try { await api('labs', 'POST', { action: 'link-flap', link: l.id, duration_ms: 1000 }); labSay('Link flap started.'); await labRefresh(); } catch (e) { labSay(e.message, true); } };
+      const capture = element('button', 'Capture 5 s'); capture.onclick = async () => { try { labSay('Capturing link…'); const out = await api('labs', 'POST', { action: 'capture', link: l.id, duration_ms: 5000 }); const binary = atob(out.pcap_base64 || ''), bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i); const url = URL.createObjectURL(new Blob([bytes], { type: 'application/vnd.tcpdump.pcap' })), a = document.createElement('a'); a.href = url; a.download = l.id + '.pcap'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); labSay('Packet capture downloaded.'); } catch (e) { labSay(e.message, true); } };
+      const applyImpairment = element('button', 'Apply link settings'); applyImpairment.onclick = async () => { try { await api('labs', 'POST', { action: 'set-impairment', link: l.id, impairment: l.impairment }); labSay('Link settings applied.'); await labRefresh(); } catch (e) { labSay(e.message, true); } };
+      const stats = labRuntimeStatus?.links?.[l.id]; labProps.append(element('strong', 'Link'), inp('Latency ms', 'latency_ms', 'int', 60000), inp('Jitter ms', 'jitter_ms', 'int', 60000), inp('Loss %', 'loss_pct', 'number', 100), inp('Corruption %', 'corrupt_pct', 'number', 100), inp('Bandwidth bps', 'bandwidth_bps', 'int', 1e12), element('span', stats ? JSON.stringify(stats).slice(0, 160) : 'No live telemetry'), applyImpairment, toggle, flap, capture); }
+  } else if (labSelected?.kind === 'assertion') {
+    const a = labTopology.assertions.find(x => x.id === labSelected.id);
+    if (a) { const kind = document.createElement('select'); for (const v of ['ping', 'traceroute', 'ospf-neighbor', 'bgp-neighbor', 'interface-up']) kind.append(new Option(v, v)); kind.value = a.kind; kind.onchange = () => { a.kind = kind.value; labRender(); }; const target = document.createElement('input'); target.value = a.target || ''; target.placeholder = 'Target / interface'; target.onchange = () => { a.target = target.value.trim(); }; const expected = document.createElement('input'); expected.value = a.expected || ''; expected.placeholder = 'Expected result (optional)'; expected.onchange = () => { a.expected = expected.value.trim(); }; labProps.append(element('strong', 'Validation check'), kind, target, expected); }
+  }
+  labToolbarStatus.textContent = labMode === 'link' ? 'Link mode: choose two nodes' : labTopology.nodes.length + ' nodes · ' + labTopology.links.length + ' links';
+}
+labCanvas.onpointermove = e => { if (!labDrag) return; const n = labTopology.nodes.find(x => x.id === labDrag.id); if (!n) return; const pt = labCanvas.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY; const p = pt.matrixTransform(labCanvas.getScreenCTM().inverse()); n.position.x = Math.max(10, Math.min(910, p.x - labDrag.dx)); n.position.y = Math.max(10, Math.min(380, p.y - labDrag.dy)); labRender(); };
+labCanvas.onpointerup = () => { labDrag = null; };
+labAddHost.onclick = () => labAddNode('host'); labAddRouter.onclick = () => labAddNode('router'); labAddSwitch.onclick = () => labAddNode('switch');
+labLinkMode.onclick = () => { labMode = 'link'; labLinkStart = null; labRender(); labSay('Select the first node.'); };
+labAddCheck.onclick = () => { const node = labTopology.nodes.find(n => n.id === labSelected?.id) || labTopology.nodes[0]; if (!node) { labSay('Add a node first.', true); return; } labTopology.assertions ||= []; const id = labFreshID('check', new Set(labTopology.assertions.map(a => a.id))); labTopology.assertions.push({ id, node: node.id, kind: 'ping', target: '127.0.0.1' }); labSelected = { kind: 'assertion', id }; labRender(); };
+labRunChecks.onclick = async () => { try { const out = await api('labs', 'POST', { action: 'check' }); labSay((out.passed || 0) + '/' + (out.total || 0) + ' checks passed.'); } catch (e) { labSay(e.message, true); } };
+labNew.onclick = () => { labTopology = { version: 1, id: 'new-lab', name: 'New lab', nodes: [], links: [] }; labName.value = labTopology.name; labSelected = null; labRender(); labSay('New topology.'); };
+labSave.onclick = async () => { const id = labName.value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32); if (!id || !/^[a-z]/.test(id)) { labSay('Topology name must start with a letter and use letters, numbers, or spaces.', true); return; } labTopology.id = id; labTopology.name = labName.value.trim(); try { await api('labs', 'POST', { action: 'save', topology: labTopology }); labSay('Topology saved on the server.'); } catch (e) { labSay(e.message, true); } };
+labLoad.onclick = async () => { try { const data = await api('labs'); const list = data.topologies || []; if (!list.length) { labSay('No saved topologies yet.'); return; } const choice = prompt('Enter a topology ID to load:\n' + list.map(t => t.id + ' — ' + t.name).join('\n'), list[0].id); if (choice == null) return; const found = list.find(t => t.id === choice); if (!found) throw new Error('Topology ID was not found.'); labTopology = found; labName.value = found.name; labSelected = null; labRender(); labSay('Topology loaded.'); } catch (e) { labSay(e.message, true); } };
+labApply.onclick = async () => { labTopology.name = labName.value.trim(); try { await api('labs', 'POST', { action: 'apply', topology: labTopology }); labSay('Topology applied.'); await labRefresh(); } catch (e) { labSay(e.message, true); } };
+labRollback.onclick = async () => { try { await api('labs', 'POST', { action: 'rollback' }); labSay('Previous topology restored.'); await labRefresh(); } catch (e) { labSay(e.message, true); } };
+async function labRefresh() { try { labRuntimeStatus = await api('labs?view=status'); labRender(); } catch (_) { /* Status is optional until a runtime backend is configured. */ } }
+labRender();
+setInterval(() => { if (scannerSub === 'topology' && $('scanner').classList.contains('active')) labRefresh(); }, 3000);
+
 let selectedDevice = null, usageRange = 60;
 const linkRates = new Map(); // slot -> { at, tx, rx, txBps, rxBps }
 const exitRates = new Map(); // exit address -> { at, tx, rx, txBps, rxBps }
@@ -345,7 +449,9 @@ function renderTopology() {
 
   topoMap.replaceChildren();
   const exit = current?.exit, standbys = (exit?.servers || []).filter(x => !x.active);
-  const rowGap = 72, rows = Math.max(paths.length, routed.length + others.length + (current?.l2_bridge ? 2 : 0), 2, standbys.length ? Math.ceil(2 + standbys.length * 1.6) : 0), height = 40 + rows * rowGap;
+  const l2 = current?.l2_bridge, l2Devices = (l2?.devices || []).slice(0, 6);
+  const rowGap = 72, rows = Math.max(paths.length, routed.length + others.length + (l2 ? 2 + l2Devices.length : 0), 2,
+    standbys.length ? Math.ceil(2 + standbys.length * 1.6) : 0, l2 ? Math.ceil(2 + standbys.length * 1.6) + 1 : 0), height = 40 + rows * rowGap;
   topoMap.setAttribute('viewBox', '0 0 1060 ' + height);
   const midY = height / 2 - 24, serverX = 10, linkX = 215, pcX = 420, hubX = 625, devX = 850, w = 180, h = 46, dh = 62; // dh: routed-device nodes carry a third line (active ports)
   const onBackup = !!exit?.on_backup;
@@ -402,14 +508,31 @@ function renderTopology() {
 
   // Layer 2 bridge: the adapter is carried as Ethernet frames through the bond to the exit's userspace gateway
   // (ARP, DHCP and every flow terminated there), so the devices keep their own MACs instead of a routed tunnel IP.
-  const l2 = current?.l2_bridge;
+  // The gateway lives at the exit, past the bonded links — not out past the LAN devices — so it hangs off the
+  // exit server's column, and the bridge's real learned devices (not a single placeholder) sit at devX.
   if (l2) {
     const r = l2Rates(l2), by = height - 62;
-    topoMap.append(mapLine(pcX + w, midY + h / 2, hubX, by + h / 2, false, null, { down: r.fromFps * 1000, up: r.toFps * 1000 }));
+    const gwY = ey + eh + 12 + standbys.length * eg;
+    topoMap.append(mapLine(serverX + w / 2, ey + eh, serverX + w / 2, gwY + h / 2, true));
+    topoMap.append(nodeBox(serverX, gwY, w, h, 'Exit gateway · 10.78.0.1', 'userspace gVisor · ARP, DHCP, NAT-free', l2.up ? 'good' : 'idle'));
+    topoMap.append(mapLine(serverX + w, gwY + h / 2, hubX, by + h / 2, false, null, { down: r.fromFps * 1000, up: r.toFps * 1000 }));
+    topoMap.append(mapLine(pcX + w, midY + h / 2, hubX, by + h / 2, false));
     topoMap.append(nodeBox(hubX, by, w, h, 'Layer 2 bridge · ' + (l2.name || 'adapter'), (l2.up ? 'up' : 'down') + ' · ' + (l2.fdb_size ?? 0) + ' MACs · ' + Math.round(r.fromFps) + '↓ ' + Math.round(r.toFps) + '↑ fps', l2.up ? 'good' : 'poor', null, false, null,
       'Frames to exit ' + (l2.to_tunnel ?? 0) + ', from exit ' + (l2.from_tunnel ?? 0) + ', flooded ' + (l2.flooded ?? 0) + ', dropped (storm/limit/blocked) ' + ((l2.drop_storm || 0) + (l2.drop_mac_limit || 0) + (l2.drop_blocked || 0))));
-    topoMap.append(mapLine(hubX + w, by + h / 2, devX, by + h / 2, true));
-    topoMap.append(nodeBox(devX, by, w, h, 'Exit gateway · 10.78.0.1', 'userspace gVisor · ARP, DHCP, NAT-free', l2.up ? 'good' : 'idle'));
+    if (l2Devices.length) {
+      const devY0 = by - (l2Devices.length - 1) * (rowGap * 0.6) / 2;
+      l2Devices.forEach((d, i) => {
+        const y = devY0 + i * rowGap * 0.6;
+        topoMap.append(mapLine(hubX + w, by + h / 2, devX, y + h / 2, false));
+        topoMap.append(nodeBox(devX, y, w, h, d.mac, (d.vlan ? 'VLAN ' + d.vlan + ' · ' : '') + 'seen ' + (d.age_secs ?? 0) + 's ago', 'good'));
+      });
+      if ((l2.devices || []).length > l2Devices.length) {
+        topoMap.append(svg('text', { class: 'tb-sub', x: devX, y: devY0 + l2Devices.length * rowGap * 0.6 + 14, 'font-size': 11 }, '+' + ((l2.devices || []).length - l2Devices.length) + ' more bridged devices'));
+      }
+    } else {
+      topoMap.append(mapLine(hubX + w, by + h / 2, devX, by + h / 2, true));
+      topoMap.append(svg('text', { class: 'tb-sub', x: devX, y: by + h / 2 + 4, 'font-size': 11 }, 'No devices learned yet'));
+    }
   }
   const hub = hubs.find(g => g.key === selectedDevice);
   if (hub) renderAdapterCard(hub); else renderDeviceCard(all.find(d => d.key === selectedDevice));

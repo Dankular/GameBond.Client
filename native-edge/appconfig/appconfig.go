@@ -321,7 +321,7 @@ func Validate(config map[string]any, opt Options) (*Result, error) {
 	if f, ok := numOpt(config, "reorder_timeout_ms", 30); !ok || f < 1 || f > 200 {
 		return nil, bad("reorder_timeout_ms must be finite and between 1 and 200")
 	}
-	for _, name := range []string{"loss_tracking", "path_mtu_discovery", "failover_replay"} {
+	for _, name := range []string{"loss_tracking", "path_mtu_discovery", "failover_replay", "lab_mode"} {
 		on, err := boolOpt(config, name, false)
 		if err != nil {
 			return nil, err

@@ -1,8 +1,8 @@
 package lan
 
 import (
-	"encoding/binary"
 	"bytes"
+	"encoding/binary"
 	"testing"
 	"time"
 
@@ -69,6 +69,130 @@ func TestL2BridgeCountsOversizeAndAppliesMACCap(t *testing.T) {
 	}
 }
 
+func TestL2BridgeCountsAndRejectsOversizeTunnelFrames(t *testing.T) {
+	b, peer, _ := newTestL2Bridge(t, L2BridgeConfig{Name: "ps5", FrameMTU: 600})
+	frame := l2frame(0x10, 0x20, 0x88b5, 587) // 601 bytes including Ethernet header.
+	if !b.Deliver(bond.WrapFrame(frame)) {
+		t.Fatal("oversize Ethernet payload was not recognized as L2")
+	}
+	if got := b.Stats()["oversize"].(uint64); got != 1 {
+		t.Fatalf("oversize count=%d, want 1", got)
+	}
+	if got, _ := peer.Read(10 * time.Millisecond); len(got) != 0 {
+		t.Fatalf("oversize frame reached the adapter: len=%d", len(got))
+	}
+}
+
+func TestL2BridgeFrameMTUReservesMaximumEgressTagStack(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		tunnel, lan bond.L2VLANPolicy
+		want        int
+	}{
+		{name: "qinq service trunk", tunnel: bond.L2VLANPolicy{ServiceVLAN: 100, AllowedCustomerVLANs: []uint16{10, 20}}, want: bond.DefaultL2FrameMTU + 8},
+		{name: "qinq customer access", tunnel: bond.L2VLANPolicy{ServiceVLAN: 100, CustomerVLAN: 10}, want: bond.DefaultL2FrameMTU},
+		{name: "single tag trunk", lan: bond.L2VLANPolicy{AllowedVLANs: []uint16{10}}, want: bond.DefaultL2FrameMTU + 4},
+		{name: "maximum across ports", tunnel: bond.L2VLANPolicy{ServiceVLAN: 100, AllowedCustomerVLANs: []uint16{10}}, lan: bond.L2VLANPolicy{AllowedVLANs: []uint16{20}}, want: bond.DefaultL2FrameMTU + 8},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b, _, _ := newTestL2Bridge(t, L2BridgeConfig{Name: "qinq", TunnelVLAN: test.tunnel, LANVLAN: test.lan})
+			if b.cfg.FrameMTU != test.want {
+				t.Fatalf("FrameMTU=%d, want %d", b.cfg.FrameMTU, test.want)
+			}
+		})
+	}
+}
+
+func TestL2BridgeAllowsReservedSingleAndQinQTagGrowth(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		tunnel, lan bond.L2VLANPolicy
+		wantDepth   int
+	}{
+		{name: "single tag", tunnel: bond.L2VLANPolicy{AccessVLAN: 10}, lan: bond.L2VLANPolicy{AllowedVLANs: []uint16{10}}, wantDepth: 1},
+		{name: "qinq", tunnel: bond.L2VLANPolicy{ServiceVLAN: 100, CustomerVLAN: 10}, lan: bond.L2VLANPolicy{ServiceVLAN: 100, AllowedCustomerVLANs: []uint16{10}}, wantDepth: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b, peer, _ := newTestL2Bridge(t, L2BridgeConfig{Name: "vlan", FrameMTU: 600, TunnelVLAN: test.tunnel, LANVLAN: test.lan})
+			frame := l2frame(0x10, 0x20, 0x88b5, 586) // exactly the configured untagged frame limit.
+			if len(frame) != 600 || !b.Deliver(bond.WrapFrame(frame)) {
+				t.Fatal("base-MTU tunnel frame was not accepted as L2")
+			}
+			got, _ := peer.Read(50 * time.Millisecond)
+			wantLen := 600 + 4*test.wantDepth
+			if len(got) != wantLen {
+				t.Fatalf("tagged adapter frame length=%d, want %d", len(got), wantLen)
+			}
+			if test.wantDepth == 1 && (got[12] != 0x81 || got[13] != 0x00) {
+				t.Fatalf("single-tag egress TPID=%02x%02x", got[12], got[13])
+			}
+			if test.wantDepth == 2 && (got[12] != 0x88 || got[13] != 0xa8 || got[16] != 0x81 || got[17] != 0x00) {
+				t.Fatalf("Q-in-Q egress TPIDs=%02x%02x/%02x%02x", got[12], got[13], got[16], got[17])
+			}
+		})
+	}
+}
+
+func TestL2BridgeCountsTagGrowthThatExceedsReservedMTU(t *testing.T) {
+	const baseMTU = 600
+	qinqAccess := bond.L2VLANPolicy{ServiceVLAN: 100, CustomerVLAN: 10}
+	qinqTrunk := bond.L2VLANPolicy{ServiceVLAN: 100, AllowedCustomerVLANs: []uint16{10}}
+	frame := l2frame(0x10, 0x20, 0x88b5, baseMTU+8-14)
+
+	t.Run("adapter to tunnel", func(t *testing.T) {
+		b, _, queued := newTestL2Bridge(t, L2BridgeConfig{Name: "qinq", FrameMTU: baseMTU, TunnelVLAN: qinqTrunk, LANVLAN: qinqAccess})
+		b.FromAdapter(frame)
+		if len(*queued) != 0 || b.Stats()["oversize"].(uint64) != 1 {
+			t.Fatalf("tag-expanded frame must be counted and withheld: queued=%d stats=%v", len(*queued), b.Stats())
+		}
+	})
+	t.Run("tunnel to adapter", func(t *testing.T) {
+		b, peer, _ := newTestL2Bridge(t, L2BridgeConfig{Name: "qinq", FrameMTU: baseMTU, TunnelVLAN: qinqAccess, LANVLAN: qinqTrunk})
+		if !b.Deliver(bond.WrapFrame(frame)) {
+			t.Fatal("oversize Ethernet payload was not recognized as L2")
+		}
+		if b.Stats()["oversize"].(uint64) != 1 {
+			t.Fatalf("tag-expanded frame was not counted: %v", b.Stats())
+		}
+		if got, _ := peer.Read(10 * time.Millisecond); len(got) != 0 {
+			t.Fatalf("tag-expanded frame reached the adapter: len=%d", len(got))
+		}
+	})
+}
+
+func TestL2BridgeFragmentsIPv4ToFitQinQTunnelEgress(t *testing.T) {
+	qinqAccess := bond.L2VLANPolicy{ServiceVLAN: 100, CustomerVLAN: 10}
+	qinqTrunk := bond.L2VLANPolicy{ServiceVLAN: 100, AllowedCustomerVLANs: []uint16{10}}
+	b, _, queued := newTestL2Bridge(t, L2BridgeConfig{Name: "qinq", FrameMTU: 1394, TunnelVLAN: qinqTrunk, LANVLAN: qinqAccess})
+	frame := make([]byte, 14+1500)
+	copy(frame[:6], []byte{2, 0, 0, 0, 0, 2})
+	copy(frame[6:12], []byte{2, 0, 0, 0, 0, 1})
+	frame[12], frame[13] = 0x08, 0x00
+	ip := frame[14:]
+	ip[0], ip[8], ip[9] = 0x45, 64, 17
+	binary.BigEndian.PutUint16(ip[2:4], uint16(len(ip)))
+	copy(ip[12:16], []byte{192, 0, 2, 1})
+	copy(ip[16:20], []byte{198, 51, 100, 2})
+	for i := 20; i < len(ip); i++ {
+		ip[i] = byte(i)
+	}
+
+	b.FromAdapter(frame)
+	if len(*queued) != 2 {
+		t.Fatalf("oversize IPv4 should be fragmented before Q-in-Q egress: queued=%d stats=%v", len(*queued), b.Stats())
+	}
+	for i, packet := range *queued {
+		out, ok := bond.UnwrapFrame(packet.Payload)
+		if !ok || len(out) > 1402 {
+			t.Fatalf("fragment %d invalid or exceeds reserved transport MTU: len=%d", i, len(out))
+		}
+		info, err := bond.ParseFrame(out)
+		if err != nil || info.VLANDepth != 2 || info.EtherType != 0x0800 {
+			t.Fatalf("fragment %d lost Q-in-Q/IPv4 framing: info=%+v err=%v", i, info, err)
+		}
+	}
+}
+
 func TestOversizeIPv4IsFragmentedOrAnsweredWithPMTU(t *testing.T) {
 	mk := func(df bool, payload int) []byte {
 		f := make([]byte, 14+20+payload)
@@ -114,5 +238,45 @@ func TestOversizeIPv4IsFragmentedOrAnsweredWithPMTU(t *testing.T) {
 	}
 	if _, _, ok := oversizeIPv4(make([]byte, 1600), 1394); ok {
 		t.Fatal("a non-IPv4 oversize frame must stay dropped")
+	}
+	withTags := func(frame []byte, tpids ...uint16) []byte {
+		out := append([]byte(nil), frame[:12]...)
+		for i, tpid := range tpids {
+			out = append(out, byte(tpid>>8), byte(tpid), 0, byte(i+1))
+			if i == len(tpids)-1 {
+				out = append(out, frame[12], frame[13])
+			}
+		}
+		return append(out, frame[14:]...)
+	}
+	for _, test := range []struct {
+		name string
+		tpid []uint16
+	}{
+		{name: "single tag", tpid: []uint16{0x8100}},
+		{name: "qinq", tpid: []uint16{0x88a8, 0x8100}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			frameMTU := 1394 + 4*len(test.tpid)
+			taggedDF := withTags(mk(true, 1480), test.tpid...)
+			fwd, back, ok := oversizeIPv4(taggedDF, frameMTU)
+			ipOffset := 14 + 4*len(test.tpid)
+			if !ok || len(fwd) != 0 || len(back) != 1 || !bytes.Equal(back[0][12:ipOffset], taggedDF[12:ipOffset]) ||
+				!bytes.Equal(back[0][:6], taggedDF[6:12]) || !bytes.Equal(back[0][6:12], taggedDF[:6]) ||
+				binary.BigEndian.Uint16(back[0][ipOffset+20+6:]) != 1380 || ipChecksum(back[0][ipOffset:ipOffset+20]) != 0 ||
+				ipChecksum(back[0][ipOffset+20:]) != 0 {
+				t.Fatalf("tagged DF packet did not preserve tags and return a valid PMTU response: ok=%v fwd=%d back=%d", ok, len(fwd), len(back))
+			}
+			tagged := withTags(mk(false, 1480), test.tpid...)
+			fwd, back, ok = oversizeIPv4(tagged, frameMTU)
+			if !ok || len(back) != 0 || len(fwd) != 2 {
+				t.Fatalf("tagged non-DF packet was not fragmented: ok=%v fwd=%d back=%d", ok, len(fwd), len(back))
+			}
+			for i, fragment := range fwd {
+				if len(fragment) > frameMTU || !bytes.Equal(fragment[:ipOffset], tagged[:ipOffset]) || ipChecksum(fragment[ipOffset:ipOffset+20]) != 0 {
+					t.Fatalf("fragment %d exceeded MTU, lost tags, or has a bad checksum", i)
+				}
+			}
+		})
 	}
 }

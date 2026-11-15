@@ -293,3 +293,107 @@ func (s *Server) serverAdminAPI(w http.ResponseWriter, r *http.Request) {
 		reply(w, 405, map[string]any{"error": "GET or POST only"})
 	}
 }
+
+// labsAPI relays the narrow lab operations through the already configured,
+// certificate-pinned server admin connection. It never accepts an arbitrary
+// upstream path from the local dashboard caller.
+func (s *Server) labsAPI(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cfg, err := readConfig(s.o.ConfigPath)
+	if err != nil {
+		reply(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	_, client, err := s.serverAdmin(cfg)
+	if err != nil {
+		reply(w, 503, map[string]any{"error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	switch r.Method {
+	case http.MethodGet:
+		if r.URL.Query().Get("view") == "status" {
+			out, err := client.LabStatus(ctx)
+			if err != nil {
+				reply(w, 502, map[string]any{"error": err.Error()})
+				return
+			}
+			reply(w, 200, out)
+			return
+		}
+		out, err := client.LabTopologies(ctx)
+		if err != nil {
+			reply(w, 502, map[string]any{"error": err.Error()})
+			return
+		}
+		reply(w, 200, out)
+	case http.MethodPost:
+		raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil || len(raw) >= 1<<20 {
+			reply(w, 400, map[string]any{"error": "request body is invalid or too large"})
+			return
+		}
+		var req struct {
+			Action     string         `json:"action"`
+			Topology   map[string]any `json:"topology"`
+			Node       string         `json:"node"`
+			Link       string         `json:"link"`
+			Interface  string         `json:"interface"`
+			DurationMS int            `json:"duration_ms"`
+			Impairment map[string]any `json:"impairment"`
+		}
+		if json.Unmarshal(raw, &req) != nil {
+			reply(w, 400, map[string]any{"error": "invalid request"})
+			return
+		}
+		switch req.Action {
+		case "save":
+			if req.Topology == nil {
+				reply(w, 400, map[string]any{"error": "topology required"})
+				return
+			}
+			if err := client.SaveLabTopology(ctx, req.Topology); err != nil {
+				reply(w, 422, map[string]any{"error": err.Error()})
+				return
+			}
+			reply(w, 200, map[string]any{"ok": true})
+		case "apply":
+			if req.Topology == nil {
+				reply(w, 400, map[string]any{"error": "topology required"})
+				return
+			}
+			out, err := client.ApplyLabTopology(ctx, req.Topology)
+			if err != nil {
+				reply(w, 422, map[string]any{"error": err.Error(), "result": out})
+				return
+			}
+			reply(w, 200, out)
+		case "check":
+			out, err := client.RunLabChecks(ctx)
+			if err != nil {
+				reply(w, 422, map[string]any{"error": err.Error(), "result": out})
+				return
+			}
+			reply(w, 200, out)
+		case "capture":
+			out, err := client.CaptureLabLink(ctx, req.Link, req.DurationMS)
+			if err != nil {
+				reply(w, 422, map[string]any{"error": err.Error()})
+				return
+			}
+			reply(w, 200, out)
+		case "pause", "resume", "rollback", "restart-node", "link-down", "link-up", "link-flap", "set-impairment", "interface-errors":
+			if err := client.LabAction(ctx, req.Action, req.Node, req.Link, req.Interface, req.DurationMS, req.Impairment); err != nil {
+				reply(w, 422, map[string]any{"error": err.Error()})
+				return
+			}
+			reply(w, 200, map[string]any{"ok": true})
+		default:
+			reply(w, 400, map[string]any{"error": "unsupported lab action"})
+		}
+	default:
+		reply(w, 405, map[string]any{"error": "GET or POST only"})
+	}
+}

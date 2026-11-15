@@ -17,15 +17,32 @@ import (
 // the exit's network as is (own MAC, own DHCP) instead of terminated by the LAN gateway. The
 // adapter must not also appear in lan_devices or uplinks.
 type l2BridgeConfig struct {
-	Enabled           bool    `json:"enabled"`
-	Name              string  `json:"name"`
-	InterfaceID       string  `json:"interface_id"`
-	InterfaceName     string  `json:"interface_name"`
-	FrameMTU          int     `json:"frame_mtu"`
-	MACLimit          int     `json:"mac_limit"`
-	BroadcastPPS      float64 `json:"broadcast_pps"`
-	MulticastPPS      float64 `json:"multicast_pps"`
-	UnknownUnicastPPS float64 `json:"unknown_unicast_pps"`
+	Enabled           bool              `json:"enabled"`
+	Name              string            `json:"name"`
+	InterfaceID       string            `json:"interface_id"`
+	InterfaceName     string            `json:"interface_name"`
+	FrameMTU          int               `json:"frame_mtu"`
+	MACLimit          int               `json:"mac_limit"`
+	BroadcastPPS      float64           `json:"broadcast_pps"`
+	MulticastPPS      float64           `json:"multicast_pps"`
+	UnknownUnicastPPS float64           `json:"unknown_unicast_pps"`
+	TunnelVLAN        bond.L2VLANPolicy `json:"tunnel_vlan,omitempty"`
+	LANVLAN           bond.L2VLANPolicy `json:"lan_vlan,omitempty"`
+}
+
+func tunnelClientMTU(outerMTU int, l2cfg *l2BridgeConfig) int {
+	mtu := outerMTU + bond.Overhead + 24
+	if l2cfg != nil {
+		mtu += l2cfg.EgressTagOverhead()
+	}
+	return mtu
+}
+
+func (c *l2BridgeConfig) EgressTagOverhead() int {
+	if c == nil {
+		return 0
+	}
+	return max(c.TunnelVLAN.EgressTagOverhead(), c.LANVLAN.EgressTagOverhead())
 }
 
 func parseL2Bridge(raw json.RawMessage) (*l2BridgeConfig, error) {
@@ -55,6 +72,12 @@ func parseL2Bridge(raw json.RawMessage) (*l2BridgeConfig, error) {
 	}
 	if c.MACLimit < 0 || c.MACLimit > 4096 || c.BroadcastPPS < 0 || c.MulticastPPS < 0 || c.UnknownUnicastPPS < 0 {
 		return nil, errors.New("l2_bridge limits must not be negative (mac_limit <= 4096)")
+	}
+	if err := c.TunnelVLAN.Validate(); err != nil {
+		return nil, fmt.Errorf("l2_bridge.tunnel_vlan: %w", err)
+	}
+	if err := c.LANVLAN.Validate(); err != nil {
+		return nil, fmt.Errorf("l2_bridge.lan_vlan: %w", err)
 	}
 	return &c, nil
 }
@@ -94,6 +117,7 @@ func l2Status() any {
 	if b := activeL2.Load(); b != nil {
 		st = b.Stats()
 		st["up"], st["orphans"] = true, l2Orphans.Load()
+		st["devices"] = b.Devices()
 	}
 	st["promiscuous"] = l2Promiscuous.Load()
 	if why, _ := l2PromiscuousWhy.Load().(string); why != "" {
@@ -115,6 +139,7 @@ func startL2Bridge(ctx context.Context, c *l2BridgeConfig, classifier *bond.Clas
 			io, err := openFrameIO(lan.DeviceConfig{Name: c.Name, InterfaceID: c.InterfaceID, InterfaceName: c.InterfaceName})
 			if err == nil {
 				b := lan.NewL2Bridge(lan.L2BridgeConfig{Name: c.Name, FrameMTU: c.FrameMTU, MACLimit: c.MACLimit,
+					TunnelVLAN: c.TunnelVLAN, LANVLAN: c.LANVLAN,
 					BroadcastPPS: c.BroadcastPPS, MulticastPPS: c.MulticastPPS, UnknownUnicastPPS: c.UnknownUnicastPPS}, io, classifier, submit)
 				activeL2.Store(b)
 				l2LastError.Store("")

@@ -271,6 +271,10 @@ func (c *Client) buildStack(server netip.AddrPort, now time.Time, plainOnly bool
 	s.SetStripeAbove(cfg.StripeAbove)
 	s.SetParityRows(cfg.ParityRowsMin, cfg.ParityRowsMax)
 	s.EnableLossTracking(cfg.LossTracking)
+	s.SetLabMode(cfg.LabMode)
+	if cfg.LabMode {
+		r.SetLabMode(true)
+	}
 	s.EnableDelayControl(cfg.DelayControl)
 	q, err := bond.NewTransmitQueue(s, cfg.QueuePackets, cfg.QueueBytes)
 	if err != nil {

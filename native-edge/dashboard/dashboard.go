@@ -111,6 +111,7 @@ func Start(o Options) (*Server, string, error) {
 	mux.HandleFunc("/api/speedtest", s.guard(s.speedtestAPI))
 	mux.HandleFunc("/api/cloudflare", s.guard(s.cloudflareAPI))
 	mux.HandleFunc("/api/server-admin", s.guard(s.serverAdminAPI))
+	mux.HandleFunc("/api/labs", s.guard(s.labsAPI))
 	mux.HandleFunc("/api/omr", s.guard(s.omrConfig))
 	mux.HandleFunc("/api/omr-check", s.guard(s.omrCheck))
 	mux.HandleFunc("/api/networks", s.guard(s.networks))

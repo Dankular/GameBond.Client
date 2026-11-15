@@ -221,6 +221,90 @@ func (c *Client) Apply(ctx context.Context, text string) error {
 	return nil
 }
 
+// LabTopologies reads the generic Linux lab definitions saved by the server portal.
+func (c *Client) LabTopologies(ctx context.Context) (map[string]any, error) {
+	status, out, err := c.call(ctx, http.MethodGet, "/api/labs/topologies", nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, apiError(status, out)
+	}
+	return out, nil
+}
+
+// SaveLabTopology validates and stores one topology definition on the server.
+func (c *Client) SaveLabTopology(ctx context.Context, topology any) error {
+	status, out, err := c.call(ctx, http.MethodPost, "/api/labs/topologies", map[string]any{"topology": topology})
+	if err != nil {
+		return err
+	}
+	if status != 200 {
+		return apiError(status, out)
+	}
+	return nil
+}
+
+// ApplyLabTopology requests a runtime apply. The portal reports an explicit
+// unavailable response until the lab lifecycle manager is installed.
+func (c *Client) ApplyLabTopology(ctx context.Context, topology any) (map[string]any, error) {
+	status, out, err := c.call(ctx, http.MethodPost, "/api/labs/apply", map[string]any{"topology": topology})
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return out, apiError(status, out)
+	}
+	return out, nil
+}
+
+// LabStatus returns runtime state and backend telemetry when a runtime exists.
+func (c *Client) LabStatus(ctx context.Context) (map[string]any, error) {
+	status, out, err := c.call(ctx, http.MethodGet, "/api/labs/status", nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, apiError(status, out)
+	}
+	return out, nil
+}
+
+// LabAction triggers one explicit fault or lifecycle operation.
+func (c *Client) LabAction(ctx context.Context, action, node, link, iface string, durationMS int, impairment map[string]any) error {
+	status, out, err := c.call(ctx, http.MethodPost, "/api/labs/action", map[string]any{"action": action, "node": node, "link": link, "interface": iface, "duration_ms": durationMS, "impairment": impairment})
+	if err != nil {
+		return err
+	}
+	if status != 200 {
+		return apiError(status, out)
+	}
+	return nil
+}
+
+// RunLabChecks executes only the assertion types declared by the active topology.
+func (c *Client) RunLabChecks(ctx context.Context) (map[string]any, error) {
+	status, out, err := c.call(ctx, http.MethodPost, "/api/labs/check", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return out, apiError(status, out)
+	}
+	return out, nil
+}
+
+func (c *Client) CaptureLabLink(ctx context.Context, link string, durationMS int) (map[string]any, error) {
+	status, out, err := c.call(ctx, http.MethodPost, "/api/labs/capture", map[string]any{"link": link, "duration_ms": durationMS})
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return out, apiError(status, out)
+	}
+	return out, nil
+}
+
 // Restart asks the server process to restart; every device loses connectivity until it is back.
 func (c *Client) Restart(ctx context.Context) error {
 	status, out, err := c.call(ctx, http.MethodPost, "/api/restart", map[string]any{"confirm": true})

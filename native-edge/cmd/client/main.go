@@ -64,6 +64,7 @@ type fileConfig struct {
 	LinkPolicies   map[string]linkpolicy.Policy `json:"link_policies"` // keyed by interface index, as in Python
 	GameUDPPorts   []uint16                     `json:"game_udp_ports"`
 	LossTracking   bool                         `json:"loss_tracking"`
+	LabMode        bool                         `json:"lab_mode"`
 	DelayControl   bool                         `json:"delay_control"`
 	Dish           *dishConfig                  `json:"dish"`
 	PathMTU        bool                         `json:"path_mtu_discovery"`
@@ -535,14 +536,19 @@ func session(parent context.Context, ready func(), logOut, relayOnly io.Writer) 
 	if err != nil {
 		return err
 	}
+	l2cfg, l2err := parseL2Bridge(cfg.L2Bridge)
+	if l2err != nil {
+		return l2err
+	}
+	clientMTU := tunnelClientMTU(outerMTU, l2cfg)
 	clientCfg := client.Config{AutoBestExit: cfg.ExitAutoBest == nil || *cfg.ExitAutoBest, Backups: backups, FailoverAfter: time.Duration(cfg.ExitFailoverMS) * time.Millisecond,
 		OnSwitch: func(from, to netip.AddrPort, reason string) {
 			b, _ := json.Marshal(map[string]any{"status": "exit_failover", "from": from.String(), "to": to.String(), "reason": reason})
 			fmt.Println(string(b))
 			sr.NoteSwitch(from, to, reason)
 		}, Key: key, Session: session, Server: peer, Uplinks: specs, Available: available,
-		MTU: outerMTU + bond.Overhead + 24, Discover: cfg.PathMTU, Failover: cfg.FailoverReplay, FlowPinning: cfg.FlowPinning, StripeAbove: cfg.StripeAbove, CoDel: cfg.CoDel, ParityRowsMin: cfg.ParityRowsMin, ParityRowsMax: cfg.ParityRowsMax,
-		InitialMbps: max(cfg.InitialMbps, 1), MaxMbps: max(cfg.MaxMbps, 100), Deliver: routed.Deliver, Outer: outer, QoS: &qosSettings, LossTracking: cfg.LossTracking, DelayControl: cfg.DelayControl}
+		MTU: clientMTU, Discover: cfg.PathMTU, Failover: cfg.FailoverReplay, FlowPinning: cfg.FlowPinning, StripeAbove: cfg.StripeAbove, CoDel: cfg.CoDel, ParityRowsMin: cfg.ParityRowsMin, ParityRowsMax: cfg.ParityRowsMax,
+		InitialMbps: max(cfg.InitialMbps, 1), MaxMbps: max(cfg.MaxMbps, 100), Deliver: routed.Deliver, Outer: outer, QoS: &qosSettings, LossTracking: cfg.LossTracking, LabMode: cfg.LabMode, DelayControl: cfg.DelayControl}
 	c, err := client.New(clientCfg)
 	if err != nil {
 		return err
@@ -569,10 +575,6 @@ func session(parent context.Context, ready func(), logOut, relayOnly io.Writer) 
 		go rdns.run(ctx, c.Snapshot, func(m string) { fmt.Fprintln(logOut, m) })
 	}
 	bridge.Uplink = routed
-	l2cfg, l2err := parseL2Bridge(cfg.L2Bridge)
-	if l2err != nil {
-		return l2err
-	}
 	if l2cfg != nil {
 		startL2Bridge(ctx, l2cfg, classifier, routed.Submit, func(m map[string]any) { b, _ := json.Marshal(m); fmt.Println(string(b)) })
 	}
