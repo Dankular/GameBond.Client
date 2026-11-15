@@ -116,6 +116,21 @@ wrap.append(issueNote('Totals since start: '+nm(oj.total_events)+' events · '+n
 wrap.append(issueNote(lg.enabled?'On-disk log (.runtime/outages): '+nm(lg.written)+' events written, '+nm(lg.dropped)+' dropped, '+nm(lg.errors)+' write errors, '+nm(lg.segments)+' segment files (size-capped, oldest deleted automatically).':'On-disk log is off.'));
 wrap.append(issueNote('Full outages (no link carrying): '+(oj.no_links_count||0)+' · longest '+(oj.no_links_max_ms?Math.round(oj.no_links_max_ms)+' ms':'—')+(oj.no_links_now?' · NO LINK CARRYING RIGHT NOW':'')));
 box.append(issueSection('Outage journal','Exact time and cause of every link failure, every moment no link was carrying, and the health of the packet-filter driver, network adapters and capture process, newest first.',oj.no_links_now?['bad','outage now']:comps.some(c=>!c.ok)?['bad','driver/adapter fault']:(oj.no_links_count||0)>0?['bad',oj.no_links_count+' full outage'+(oj.no_links_count>1?'s':'')]:ev.length?['warn',ev.length+' events']:['ok','none'],wrap))}
+/* drops: every place the transport refuses or discards a packet, with the reason, so none is silent */
+{const sd=t.send||{},rc=t.receive||{},nm=x=>(x||0).toLocaleString(),wrap=document.createElement('div');
+const rows=[['Refused to send: over the datagram limit',sd.RefusedOversize,'Largest refused '+nm(sd.RefusedOversizeLargest)+' B against a limit of '+nm(sd.DatagramLimit)+' B. The limit must admit the largest bridged frame.'],
+['Dropped on receive: over the datagram limit',rc.Oversize,'Largest seen '+nm(rc.OversizeLargest)+' B. The peer sends more than this side accepts.'],
+['No path fits the datagram',sd.MTUNoFit,'Every path MTU is smaller than the datagram; it was sent anyway and may be lost'],
+['Refused by the wire pacer',sd.WireLimited,'The path rate limit refused a datagram'],
+['Socket send errors',sd.SocketErrors,'The operating system refused a send'],
+['Malformed datagrams',rc.Malformed,'Failed to parse, or from an unconfigured peer'],
+['Authentication errors',rc.AuthenticationErrors,'Wrong key or tampered datagram'],
+['Below the receive floor',rc.FloorDrops,'Older than the reorder floor'],
+['Policy drops',rc.PolicyDrops,'A path policy refused the datagram'],
+['Replay: too old / too far',(rc.ReplayTooOld||0)+(rc.ReplayTooFar||0),'Outside the replay window']];
+wrap.append(issueTable(['Reason','Count','What it means'],rows.map(c=>{const tr=document.createElement('tr');tr.append(issueCell(c[0],(c[1]||0)>0?'hot':''),issueCell(nm(c[1]),'num'),issueCell(c[2]));return tr})));
+const bad=(sd.RefusedOversize||0)+(rc.Oversize||0)>0,warn=rows.some(c=>(c[1]||0)>0);
+box.append(issueSection('Drops','Every place the transport refuses or discards a packet, with the reason. A nonzero count is a fault to explain, not noise.',bad?['bad','oversize refusals']:warn?['warn','drops seen']:['ok','none'],wrap))}
 /* layer 2 bridge */
 {const l2=t.l2_bridge;if(l2){const wrap=document.createElement('div'),nm=x=>(x||0).toLocaleString();
 const counters=[['Frames up to the exit',l2.to_tunnel,'Device frames sent over the bond'],['Frames down from the exit',l2.from_tunnel,'Gateway frames written to the adapter'],['Oversize frames',l2.oversize,'Larger than the tunnel carries; answered with ICMP frag-needed (DF) or fragmented'],['Adapter write errors',l2.write_errors,'The packet-filter driver refused a frame'],['Switch drops',l2.switch_drops,'Storm control, MAC limit, loop hold'],['Queue full',l2.queue_full,'Bond send queue refused a frame'],['Devices learned',l2.fdb_size,'MACs in the forwarding table'],['Flooded',l2.flooded,'Frames sent to every port (unknown or broadcast)'],['Orphans',l2.orphans,'Frames from the exit that arrived while no bridge was up']];
