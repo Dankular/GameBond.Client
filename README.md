@@ -270,7 +270,9 @@ Opt-in and off by default. The code is built, tested and deployed to both exits 
 - **Network Scanner has two views, Devices and Topology.** Devices is the existing list. Topology draws the exit
   server, each bonded link with its live in/out rate, RTT and health, this PC, and every device behind it, under a
   headline that reads "Everything is great!" or names the link that is down. A row of counters shows links up, routed
-  devices, other LAN devices and the wire rate in and out. New: `native-edge/dashboard/widget_topology.js`.
+  devices, other LAN devices and the wire rate in and out. The live map also reports local-network forwarding and drop
+  counters, per-network DHCP pool and relay activity, and Layer 2 bridge MAC/FDB, forwarding, flooding and drop metrics.
+  New: `native-edge/dashboard/widget_topology.js`.
 - **Devices that share one physical adapter hang off an adapter node** that shows the combined rate through it (an access point
   and the devices connected to it). Clicking the node shows combined gauges and a table of every device behind it. Found because the
   Archer's own address carries almost nothing while the PS5 and Laptop behind it carry the traffic.

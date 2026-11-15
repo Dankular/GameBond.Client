@@ -18,6 +18,7 @@ topoStyle.textContent += '.port-active{color:#00a66c;font-weight:600}.gl{stroke:
   + '.topo-pies{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin:14px 0}.pie-card{border:1px solid #e1e5eb;border-radius:10px;padding:10px 14px;min-width:0}.pie-card h3{margin:0 0 6px;font-size:12px;text-transform:uppercase;color:#7b8089}'
   + '.pie-body{display:flex;gap:14px;align-items:center}.pie-svg{width:128px;height:128px;flex:none}.pie-track{stroke:#e8edf3}.pie-num{fill:#393b43;font-weight:600}.pie-legend{flex:1;min-width:0;font-size:12px}'
   + '.pie-legend div{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:6px;align-items:center;margin:2px 0}.pie-legend i{width:9px;height:9px;border-radius:2px;display:inline-block}.pie-legend span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pie-legend b{font-weight:500;color:#505762}'
+  + '.topo-network-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin:12px 0}.topo-metric-card{border:1px solid #e1e5eb;border-radius:10px;padding:10px 12px;min-width:0}.topo-metric-card h3{margin:0 0 6px;font-size:12px;text-transform:uppercase;color:#7b8089}.topo-metric-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.topo-metric{border-radius:7px;background:#f4f6f9;padding:6px 8px;min-width:0}.topo-metric b{display:block;font-size:15px;font-weight:600;overflow:hidden;text-overflow:ellipsis}.topo-metric span{font-size:10px;color:#7b8089}.topo-network-row{border-top:1px solid #e8edf3;padding:7px 0;font-size:12px}.topo-network-row:first-of-type{border-top:0}.topo-network-row b{font-weight:600}.topo-network-row div{color:#7b8089;margin-top:2px}.topo-metric-note{font-size:10px;color:#7b8089;margin:6px 0 0}'
   + '.pie-card .sub{color:#7b8089;font-size:11px;margin:6px 0 0}.tp-panel{margin:6px 0 10px}.tp-panel h4{margin:0 0 2px;font-size:12px;color:#505762;font-weight:600}.tp-legend{display:flex;gap:14px;flex-wrap:wrap;color:#7b8089;font-size:11px;margin:2px 0}.tp-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}';
 topoStyle.textContent += '.tb-rect{fill:#fff;stroke:#cfd5dd}.tb-title{fill:#393b43}.tb-sub{fill:#7b8089}.tl{stroke:#aab2bd}.tl-label{fill:#505762}.g-bg{fill:#f4f6f9;stroke:#cfd5dd}.d-track{stroke:#e8edf3}.ax{stroke:#cfd5dd}';
 document.head.append(topoStyle);
@@ -68,8 +69,9 @@ const topoHead = element('div', null, { class: 'topo-head', role: 'status' });
 const topoStats = element('div', null, { class: 'topo-stats' });
 const topoMap = svg('svg', { class: 'topo-svg', viewBox: '0 0 1060 360', role: 'group', 'aria-label': 'Network topology' });
 const topoCard = element('div');
+const topoNetworkMetrics = element('div', null, { class: 'topo-network-metrics' });
 const topoPies = element('div', null, { class: 'topo-pies' });
-topoPane.append(topoHead, topoStats, topoMap, topoPies, topoCard);
+topoPane.append(topoHead, topoStats, topoMap, topoNetworkMetrics, topoPies, topoCard);
 
 // A small authoring surface built from the same SVG and node-card primitives as
 // the live map. Desired state is saved by the server portal, never in the status view.
@@ -230,6 +232,55 @@ function l2Rates(b) {
     l2Prev.at = now; l2Prev.to = to; l2Prev.from = from;
   } else if (!l2Prev.at) { l2Prev.at = now; l2Prev.to = to; l2Prev.from = from; }
   return { toFps: l2Prev.toBps, fromFps: l2Prev.fromBps };
+}
+
+function renderNetworkMetrics() {
+  topoNetworkMetrics.replaceChildren();
+  const local = current?.local_networks || {}, networks = Array.isArray(local.networks) ? local.networks : [], stats = local.stats || {};
+  const metricCard = (title, values, note) => {
+    const card = element('section', null, { class: 'topo-metric-card' });
+    card.append(element('h3', title));
+    const grid = element('div', null, { class: 'topo-metric-grid' });
+    for (const [label, value] of values) {
+      const tile = element('div', null, { class: 'topo-metric' });
+      tile.append(element('b', String(value)), element('span', label)); grid.append(tile);
+    }
+    card.append(grid);
+    if (note) card.append(element('p', note, { class: 'topo-metric-note' }));
+    return card;
+  };
+  const count = value => (Number(value) || 0).toLocaleString();
+  if (networks.length) {
+    topoNetworkMetrics.append(metricCard('Local L3 forwarding', [
+      ['Networks up', networks.filter(n => n.up).length + ' / ' + networks.length], ['Packets routed', count(stats.PacketsRouted)],
+      ['To tunnel', count(stats.PacketsToTunnel)], ['From tunnel', count(stats.PacketsFromTunnel)],
+      ['Source guard drops', count(stats.SpoofedSourceDropped)], ['No route', count(stats.NoRoute)],
+      ['Inter-network denied', count(stats.InterNetworkDenied)], ['TTL expired', count(stats.TTLExpired)],
+      ['VLAN rejected', count(stats.VLANRejected)], ['Queue drops', count(stats.QueueDrops)],
+    ], 'Forwarding and drop counters since the client started.'));
+    const card = element('section', null, { class: 'topo-metric-card' });
+    card.append(element('h3', 'Local networks · DHCP and relay'));
+    for (const n of networks) {
+      const row = element('div', null, { class: 'topo-network-row' });
+      const vlan = n.vlan_id ? ' · VLAN ' + n.vlan_id : '', state = n.up ? 'up' : 'down';
+      row.append(element('b', (n.name || 'Network') + ' · ' + state), element('div', n.prefix + vlan + ' · ' + count(n.neighbors) + ' neighbors'));
+      if (n.dhcp_pool) row.append(element('div', 'DHCP leases ' + count(n.dhcp_pool.leased) + ' / ' + count(n.dhcp_pool.size) + ' · free ' + count(n.dhcp_pool.free)));
+      if (n.dhcp_stats) row.append(element('div', 'DHCP offers ' + count(n.dhcp_stats.Offers) + ' · ACKs ' + count(n.dhcp_stats.Acks) + ' · NAKs ' + count(n.dhcp_stats.NAKs)));
+      if (n.relay_stats) row.append(element('div', 'Relay requests ' + count(n.relay_stats.Requests) + ' · replies ' + count(n.relay_stats.Replies) + ' · rejected ' + count(n.relay_stats.Rejected) + ' · expired ' + count(n.relay_stats.Expired)));
+      card.append(row);
+    }
+    topoNetworkMetrics.append(card);
+  }
+  const l2 = current?.l2_bridge;
+  if (l2) {
+    const drops = (Number(l2.drop_storm) || 0) + (Number(l2.drop_mac_limit) || 0) + (Number(l2.drop_blocked) || 0) + (Number(l2.switch_drops) || 0) + (Number(l2.queue_full) || 0) + (Number(l2.oversize) || 0);
+    topoNetworkMetrics.append(metricCard('Layer 2 bridge', [
+      ['State', l2.up ? 'up' : 'down'], ['MAC table', count(l2.fdb_size)], ['Learned', count(l2.learned)], ['Moves', count(l2.moves)],
+      ['Forwarded', count(l2.forwarded)], ['Flooded', count(l2.flooded)], ['Frames to exit', count(l2.to_tunnel)], ['Frames from exit', count(l2.from_tunnel)],
+      ['Drops / rejects', count(drops)], ['Orphan frames', count(l2.orphans)],
+    ], 'Drop total combines storm, MAC limit, blocked, switch, queue and oversize counters.'));
+  }
+  if (!networks.length && !current?.l2_bridge) topoNetworkMetrics.append(element('p', 'No local L2 bridge or routed local networks are active.', { class: 'notice' }));
 }
 
 function overallHealth(paths) {
@@ -439,6 +490,7 @@ function renderTopology() {
   const paths = current?.transport?.paths || [], { routed, others, extra } = topologyDevices();
   updateLinkRates(paths);
   updateExitRates(current?.exit?.servers || []);
+  renderNetworkMetrics();
   renderPies(routed, others, extra);
   const [health, headline] = overallHealth(paths);
   topoHead.replaceChildren();
