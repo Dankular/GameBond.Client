@@ -508,15 +508,15 @@ function renderTopology() {
 
   // Layer 2 bridge: the adapter is carried as Ethernet frames through the bond to the exit's userspace gateway
   // (ARP, DHCP and every flow terminated there), so the devices keep their own MACs instead of a routed tunnel IP.
-  // The gateway lives at the exit, past the bonded links — not out past the LAN devices — so it hangs off the
-  // exit server's column, and the bridge's real learned devices (not a single placeholder) sit at devX.
+  // The bridge is part of this PC, so its frames leave the same way every other packet does — through the
+  // bonded links to the exit server — never a line straight from the bridge to the gateway. The gateway node
+  // just hangs off the exit server (dashed, like a standby) to show where that traffic is actually consumed.
   if (l2) {
     const r = l2Rates(l2), by = height - 62;
     const gwY = ey + eh + 12 + standbys.length * eg;
     topoMap.append(mapLine(serverX + w / 2, ey + eh, serverX + w / 2, gwY + h / 2, true));
     topoMap.append(nodeBox(serverX, gwY, w, h, 'Exit gateway · 10.78.0.1', 'userspace gVisor · ARP, DHCP, NAT-free', l2.up ? 'good' : 'idle'));
-    topoMap.append(mapLine(serverX + w, gwY + h / 2, hubX, by + h / 2, false, null, { down: r.fromFps * 1000, up: r.toFps * 1000 }));
-    topoMap.append(mapLine(pcX + w, midY + h / 2, hubX, by + h / 2, false));
+    topoMap.append(mapLine(pcX + w, midY + h / 2, hubX, by + h / 2, false, null, { down: r.fromFps * 1000, up: r.toFps * 1000 }));
     topoMap.append(nodeBox(hubX, by, w, h, 'Layer 2 bridge · ' + (l2.name || 'adapter'), (l2.up ? 'up' : 'down') + ' · ' + (l2.fdb_size ?? 0) + ' MACs · ' + Math.round(r.fromFps) + '↓ ' + Math.round(r.toFps) + '↑ fps', l2.up ? 'good' : 'poor', null, false, null,
       'Frames to exit ' + (l2.to_tunnel ?? 0) + ', from exit ' + (l2.from_tunnel ?? 0) + ', flooded ' + (l2.flooded ?? 0) + ', dropped (storm/limit/blocked) ' + ((l2.drop_storm || 0) + (l2.drop_mac_limit || 0) + (l2.drop_blocked || 0))));
     if (l2Devices.length) {
