@@ -32,6 +32,11 @@ themeStyle.textContent = [
   'html[data-theme=dark] .chip{background:#2a2f38;color:#c4cad4}html[data-theme=dark] .chip.good{background:#173a1c;color:#7ddc6a}html[data-theme=dark] .chip.poor{background:#43201f;color:#ff9a96}',
   'html[data-theme=dark] .notice{background:#232830;color:#aab2bd}html[data-theme=dark] .svc-bar{background:#2a2f38}',
   'html[data-theme=dark] .subtabs .seg.active,html[data-theme=dark] .range .seg.active{background:#2f6fdf;color:#fff}',
+  'html[data-theme=dark] .topo-metric-card{border-color:#2f343d}html[data-theme=dark] .topo-metric-card h3{color:#8d95a3}',
+  'html[data-theme=dark] .topo-metric{background:#1f232a}html[data-theme=dark] .topo-metric span{color:#8d95a3}',
+  'html[data-theme=dark] .topo-network-row{border-color:#2a2f38}html[data-theme=dark] .topo-network-row div{color:#8d95a3}',
+  'html[data-theme=dark] .topo-metric-note,html[data-theme=dark] details.topo-metric-card summary{color:#8d95a3}',
+  'html[data-theme=dark] .topo-frame-log{background:#1f232a;color:#c4cad4}',
 ].join('\n');
 document.head.append(themeStyle);
 
