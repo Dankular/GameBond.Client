@@ -338,13 +338,16 @@ function activePorts(usage) {
   return { line, tip: 'Active remote ports (traffic in the last 10 seconds)\n' + tip };
 }
 
+// Cuts to n characters and marks it with an ellipsis so a clipped line never reads as complete
+// (e.g. "seen 0" instead of "seen 0s ago" silently dropping the unit).
+function clip(text, n) { text = String(text || ''); return text.length > n ? text.slice(0, n - 1) + '…' : text; }
 function nodeBox(x, y, w, h, title, subtitle, state, onActivate, selected, extraLine, tip) {
   const g = svg('g', { class: 'topo-node' + (selected ? ' sel' : ''), transform: 'translate(' + x + ',' + y + ')' });
   const color = state === 'good' ? '#2fb800' : state === 'poor' ? '#e0201b' : state === 'fair' ? '#f5a300' : '#9aa1ab';
   g.append(svg('rect', { class: 'tb-rect', width: w, height: h, rx: 8 }), svg('circle', { cx: 12, cy: 14, r: 4, fill: color }),
-    svg('text', { class: 'tb-title', x: 22, y: 18, 'font-size': 12 }, String(title).slice(0, 27)), svg('text', { class: 'tb-sub', x: 12, y: 36, 'font-size': 11 }, String(subtitle || '').slice(0, 26)));
+    svg('text', { class: 'tb-title', x: 22, y: 18, 'font-size': 12 }, clip(title, 27)), svg('text', { class: 'tb-sub', x: 12, y: 36, 'font-size': 11 }, clip(subtitle, 26)));
   if (tip) g.append(svg('title', {}, tip));
-  (Array.isArray(extraLine) ? extraLine : extraLine ? [extraLine] : []).forEach((t, i) => g.append(svg('text', { class: 'tb-sub', x: 12, y: 51 + i * 13, 'font-size': 10 }, String(t).slice(0, 32))));
+  (Array.isArray(extraLine) ? extraLine : extraLine ? [extraLine] : []).forEach((t, i) => g.append(svg('text', { class: 'tb-sub', x: 12, y: 51 + i * 13, 'font-size': 10 }, clip(t, 32))));
   if (onActivate) {
     g.setAttribute('tabindex', '0'); g.setAttribute('role', 'button'); g.setAttribute('aria-label', title + (subtitle ? ', ' + subtitle : ''));
     g.onclick = onActivate; g.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onActivate(); } };
@@ -441,12 +444,15 @@ function donutCard(title, slices, centerValue, centerLabel, note) {
   return card;
 }
 
-function renderPies(routed, others, extra) {
+function renderPies(routed, others, extra, bridged = []) {
   const online = routed.filter(d => d.up && d.present !== false).length, offline = routed.length - online, lanOnly = others.length + extra;
-  const total = routed.length + lanOnly;
-  const devices = donutCard('Devices', [
+  const total = routed.length + lanOnly + bridged.length;
+  const slices = [
     { label: 'Routed · online', value: online, text: String(online), color: '#2fb800' }, { label: 'Routed · offline', value: offline, text: String(offline), color: '#e0201b' },
-    { label: 'LAN only', value: lanOnly, text: String(lanOnly), color: '#9aa1ab' }], String(total), total === 1 ? 'device' : 'devices', 'Routed devices go through GameBond; LAN-only devices are seen by the scanner but not routed.');
+    { label: 'LAN only', value: lanOnly, text: String(lanOnly), color: '#9aa1ab' }];
+  if (bridged.length) slices.push({ label: 'Bridged (L2)', value: bridged.length, text: String(bridged.length), color: '#0f7ae5' });
+  const devices = donutCard('Devices', slices, String(total), total === 1 ? 'device' : 'devices',
+    'Routed devices go through GameBond; LAN-only devices are seen by the scanner but not routed; bridged devices carry their own MAC through the Layer 2 bridge.');
   // Clients by vendor: the scanner's inventory knows the vendor for a MAC; anything it cannot name is "Unknown".
   const byMac = new Map((deviceInventory?.devices || []).map(x => [macKey(x.mac), x.vendor || '']));
   const counts = new Map();
@@ -517,22 +523,26 @@ function throughputChart(history, latency, minutes, dir) {
 function renderTopology() {
   if (!current || current.state === 'unavailable' && !current.transport) { topoHead.textContent = 'Status unavailable'; return; }
   const paths = current?.transport?.paths || [], { routed, others, extra } = topologyDevices();
+  const l2All = current?.l2_bridge, bridgedDevices = l2All?.devices || [];
   updateLinkRates(paths);
   updateExitRates(current?.exit?.servers || []);
   renderNetworkMetrics();
-  renderPies(routed, others, extra);
+  renderPies(routed, others, extra, bridgedDevices);
   const [health, headline] = overallHealth(paths);
   topoHead.replaceChildren();
   if (health === 'good') { topoHead.append('Everything is ', element('b', 'great', { class: 'good' }), '!'); } else topoHead.append(element('b', headline, { class: health }));
   const totalRx = paths.reduce((s, p) => s + (linkRates.get(p.slot)?.rxBps || 0), 0), totalTx = paths.reduce((s, p) => s + (linkRates.get(p.slot)?.txBps || 0), 0);
   topoStats.replaceChildren();
-  for (const [value, label] of [[paths.filter(p => p.healthy).length + '/' + paths.length, 'Links up'], [routed.length, 'Routed devices'], [others.length + (extra ? '+' : ''), 'Other LAN devices'], ['↓ ' + fmtBps(totalRx), 'Wire in (all links)'], ['↑ ' + fmtBps(totalTx), 'Wire out (all links)']]) {
+  const statRow = [[paths.filter(p => p.healthy).length + '/' + paths.length, 'Links up'], [routed.length, 'Routed devices'], [others.length + (extra ? '+' : ''), 'Other LAN devices']];
+  if (bridgedDevices.length) statRow.push([bridgedDevices.length, 'Bridged (L2) devices']);
+  statRow.push(['↓ ' + fmtBps(totalRx), 'Wire in (all links)'], ['↑ ' + fmtBps(totalTx), 'Wire out (all links)']);
+  for (const [value, label] of statRow) {
     const box = element('div', null, { class: 'topo-stat' }); box.append(element('strong', String(value)), element('span', label)); topoStats.append(box);
   }
 
   topoMap.replaceChildren();
   const exit = current?.exit, standbys = (exit?.servers || []).filter(x => !x.active);
-  const l2 = current?.l2_bridge, l2Devices = (l2?.devices || []).slice(0, 6);
+  const l2 = l2All, l2Devices = bridgedDevices.slice(0, 6);
   const rowGap = 72, rows = Math.max(paths.length, routed.length + others.length + (l2 ? 2 + l2Devices.length : 0), 2,
     standbys.length ? Math.ceil(2 + standbys.length * 1.6) : 0, l2 ? Math.ceil(2 + standbys.length * 1.6) + 1 : 0), height = 40 + rows * rowGap;
   topoMap.setAttribute('viewBox', '0 0 1060 ' + height);
@@ -603,14 +613,16 @@ function renderTopology() {
     topoMap.append(nodeBox(hubX, by, w, h, 'Layer 2 bridge · ' + (l2.name || 'adapter'), (l2.up ? 'up' : 'down') + ' · ' + (l2.fdb_size ?? 0) + ' MACs · ' + Math.round(r.fromFps) + '↓ ' + Math.round(r.toFps) + '↑ fps', l2.up ? 'good' : 'poor', null, false, null,
       'Frames to exit ' + (l2.to_tunnel ?? 0) + ', from exit ' + (l2.from_tunnel ?? 0) + ', flooded ' + (l2.flooded ?? 0) + ', dropped (storm/limit/blocked) ' + ((l2.drop_storm || 0) + (l2.drop_mac_limit || 0) + (l2.drop_blocked || 0))));
     if (l2Devices.length) {
-      // Bridged devices are known to the switch only by MAC; name them from the same scanner
-      // inventory the "other LAN devices" list already uses, keyed by that MAC.
+      // Bridged devices are known to the switch only by MAC. The scanner's passive neighbor cache
+      // only sees this host's own LAN segment, so it rarely has an entry for a device that is
+      // actually beyond the tunnel; treat a resolved name as a bonus, not something the MAC can be
+      // swapped out for, so the label stays useful even when (as is typical) nothing resolves.
       const l2Names = new Map((deviceInventory?.devices || []).map(x => [macKey(x.mac), x.hostname || x.vendor || '']));
       const devY0 = by - (l2Devices.length - 1) * (rowGap * 0.6) / 2;
       l2Devices.forEach((d, i) => {
-        const y = devY0 + i * rowGap * 0.6, name = l2Names.get(macKey(d.mac)) || d.mac;
+        const y = devY0 + i * rowGap * 0.6, resolved = l2Names.get(macKey(d.mac));
         topoMap.append(mapLine(hubX + w, by + h / 2, devX, y + h / 2, false));
-        topoMap.append(nodeBox(devX, y, w, h, name, d.mac + (d.vlan ? ' · VLAN ' + d.vlan : '') + ' · seen ' + (d.age_secs ?? 0) + 's ago', 'good'));
+        topoMap.append(nodeBox(devX, y, w, h, d.mac, (resolved ? resolved + ' · ' : '') + (d.age_secs ?? 0) + 's ago' + (d.vlan ? ' · VLAN ' + d.vlan : ''), 'good'));
       });
       if ((l2.devices || []).length > l2Devices.length) {
         topoMap.append(svg('text', { class: 'tb-sub', x: devX, y: devY0 + l2Devices.length * rowGap * 0.6 + 14, 'font-size': 11 }, '+' + ((l2.devices || []).length - l2Devices.length) + ' more bridged devices'));
