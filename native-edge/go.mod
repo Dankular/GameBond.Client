@@ -30,6 +30,6 @@ require (
 )
 
 require (
-	github.com/Dankular/GameBond.Core v0.1.35
+	github.com/Dankular/GameBond.Core v0.1.36
 	modernc.org/sqlite v1.62.0
 )
