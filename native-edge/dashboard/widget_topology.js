@@ -43,23 +43,25 @@ function ago(unix) {
   return s < 90 ? Math.round(s) + ' s ago' : s < 5400 ? Math.round(s / 60) + ' min ago' : s < 172800 ? (s / 3600).toFixed(1) + ' h ago' : Math.round(s / 86400) + ' d ago';
 }
 
-// Split the two views of the scanner tab: the existing device list, and the topology.
-const topoPane = element('div'), devicesPane = element('div');
+// Split the views of the Network tab: the existing device list, the live topology map, and
+// (separately, since it is an authoring tool rather than a live view) the lab designer.
+const topoPane = element('div'), devicesPane = element('div'), labPane = element('div');
 devicesPane.append(...Array.from(scanPanel.children).slice(1));
 const subTabs = element('div', null, { class: 'subtabs', role: 'tablist' });
-const subDevices = element('button', 'Devices', { class: 'seg active', role: 'tab' }), subTopology = element('button', 'Topology', { class: 'seg', role: 'tab' });
-subTabs.append(subDevices, subTopology);
-scanPanel.append(subTabs, devicesPane, topoPane);
+const subDevices = element('button', 'Devices', { class: 'seg active', role: 'tab' }), subTopology = element('button', 'Topology', { class: 'seg', role: 'tab' }), subLab = element('button', 'Lab', { class: 'seg', role: 'tab' });
+subTabs.append(subDevices, subTopology, subLab);
+scanPanel.append(subTabs, devicesPane, topoPane, labPane);
 let scannerSub = 'devices';
 function showScannerSub(which) {
   scannerSub = which;
-  devicesPane.hidden = which !== 'devices'; topoPane.hidden = which !== 'topology';
-  subDevices.classList.toggle('active', which === 'devices'); subTopology.classList.toggle('active', which === 'topology');
-  subDevices.setAttribute('aria-selected', which === 'devices'); subTopology.setAttribute('aria-selected', which === 'topology');
+  devicesPane.hidden = which !== 'devices'; topoPane.hidden = which !== 'topology'; labPane.hidden = which !== 'lab';
+  subDevices.classList.toggle('active', which === 'devices'); subTopology.classList.toggle('active', which === 'topology'); subLab.classList.toggle('active', which === 'lab');
+  subDevices.setAttribute('aria-selected', which === 'devices'); subTopology.setAttribute('aria-selected', which === 'topology'); subLab.setAttribute('aria-selected', which === 'lab');
   if (which === 'topology') renderTopology();
 }
 subDevices.onclick = () => showScannerSub('devices');
 subTopology.onclick = () => showScannerSub('topology');
+subLab.onclick = () => showScannerSub('lab');
 showScannerSub('devices');
 
 const topoHead = element('div', null, { class: 'topo-head', role: 'status' });
@@ -84,7 +86,7 @@ labToolbar.append(labName, labNew, labAddHost, labAddRouter, labAddSwitch, labLi
 const labCanvas = svg('svg', { class: 'lab-canvas', viewBox: '0 0 1060 460', role: 'group', 'aria-label': 'Editable lab topology' });
 const labAssertions = element('div', null, { class: 'lab-toolbar' }), labProps = element('div', null, { class: 'lab-props' }), labMessage = element('div', null, { class: 'lab-msg', role: 'status' });
 labEditor.append(labToolbar, labCanvas, labAssertions, labProps, labMessage, element('p', 'Choose Draw link, then select two nodes. Drag nodes to arrange them. Impairments apply in real time when the lab runtime is available.', { class: 'lab-help' }));
-topoPane.append(labEditor);
+labPane.append(labEditor);
 let labTopology = { version: 1, id: 'new-lab', name: 'New lab', nodes: [], links: [] }, labSelected = null, labMode = 'select', labLinkStart = null, labDrag = null, labRuntimeStatus = null;
 const labInterfaceFaults = new Map();
 function labSay(message, error = false) { labMessage.textContent = message; labMessage.classList.toggle('error', error); }

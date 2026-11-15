@@ -15,7 +15,7 @@ document.head.append(adoptStyle);
 }
 
 const adoptPanel = element('div', null, { class: 'adopt-panel' });
-scanPanel.insertBefore(adoptPanel, subTabs);
+devicesPane.prepend(adoptPanel);
 let serverSync = null, serverSyncCheckedAt = 0, adoptBusy = false, adoptMsg = '', adoptFixed = new Map(); // mac -> { on, ip }
 
 async function refreshServerSync(check) {

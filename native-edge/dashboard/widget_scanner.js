@@ -3,7 +3,7 @@ const scanPanel = document.querySelector('#scanner .panel');
 const adapterDetails = element('details'), adapterSummary = element('summary', 'Local adapter inventory');
 adapterDetails.append(adapterSummary, scanPanel.querySelector('table'));
 scanPanel.replaceChildren();
-scanPanel.append(element('h1', 'Network Scanner'));
+scanPanel.append(element('h1', 'Network'));
 const scanToolbar = element('div', null, { class: 'row' });
 const scanAdapter = element('select', null, { 'aria-label': 'Discovery adapter' });
 const scanSubnet = input('text', '', 'Discovery subnet', { placeholder: '192.168.1.0/24' });
