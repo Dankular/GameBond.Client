@@ -19,6 +19,7 @@ topoStyle.textContent += '.port-active{color:#00a66c;font-weight:600}.gl{stroke:
   + '.pie-body{display:flex;gap:14px;align-items:center}.pie-svg{width:128px;height:128px;flex:none}.pie-track{stroke:#e8edf3}.pie-num{fill:#393b43;font-weight:600}.pie-legend{flex:1;min-width:0;font-size:12px}'
   + '.pie-legend div{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:6px;align-items:center;margin:2px 0}.pie-legend i{width:9px;height:9px;border-radius:2px;display:inline-block}.pie-legend span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pie-legend b{font-weight:500;color:#505762}'
   + '.topo-network-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin:12px 0}.topo-metric-card{border:1px solid #e1e5eb;border-radius:10px;padding:10px 12px;min-width:0}.topo-metric-card h3{margin:0 0 6px;font-size:12px;text-transform:uppercase;color:#7b8089}.topo-metric-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.topo-metric{border-radius:7px;background:#f4f6f9;padding:6px 8px;min-width:0}.topo-metric b{display:block;font-size:15px;font-weight:600;overflow:hidden;text-overflow:ellipsis}.topo-metric span{font-size:10px;color:#7b8089}.topo-network-row{border-top:1px solid #e8edf3;padding:7px 0;font-size:12px}.topo-network-row:first-of-type{border-top:0}.topo-network-row b{font-weight:600}.topo-network-row div{color:#7b8089;margin-top:2px}.topo-metric-note{font-size:10px;color:#7b8089;margin:6px 0 0}'
+  + 'details.topo-metric-card{grid-column:1/-1}details.topo-metric-card summary{cursor:pointer;font-size:12px;text-transform:uppercase;color:#7b8089;font-weight:500}.topo-frame-log{max-height:280px;overflow:auto;font-size:11px;background:#f4f6f9;border-radius:7px;padding:8px;margin:8px 0 0;white-space:pre-wrap}'
   + '.pie-card .sub{color:#7b8089;font-size:11px;margin:6px 0 0}.tp-panel{margin:6px 0 10px}.tp-panel h4{margin:0 0 2px;font-size:12px;color:#505762;font-weight:600}.tp-legend{display:flex;gap:14px;flex-wrap:wrap;color:#7b8089;font-size:11px;margin:2px 0}.tp-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}';
 topoStyle.textContent += '.tb-rect{fill:#fff;stroke:#cfd5dd}.tb-title{fill:#393b43}.tb-sub{fill:#7b8089}.tl{stroke:#aab2bd}.tl-label{fill:#505762}.g-bg{fill:#f4f6f9;stroke:#cfd5dd}.d-track{stroke:#e8edf3}.ax{stroke:#cfd5dd}';
 document.head.append(topoStyle);
@@ -273,12 +274,40 @@ function renderNetworkMetrics() {
   }
   const l2 = current?.l2_bridge;
   if (l2) {
-    const drops = (Number(l2.drop_storm) || 0) + (Number(l2.drop_mac_limit) || 0) + (Number(l2.drop_blocked) || 0) + (Number(l2.switch_drops) || 0) + (Number(l2.queue_full) || 0) + (Number(l2.oversize) || 0);
     topoNetworkMetrics.append(metricCard('Layer 2 bridge', [
-      ['State', l2.up ? 'up' : 'down'], ['MAC table', count(l2.fdb_size)], ['Learned', count(l2.learned)], ['Moves', count(l2.moves)],
-      ['Forwarded', count(l2.forwarded)], ['Flooded', count(l2.flooded)], ['Frames to exit', count(l2.to_tunnel)], ['Frames from exit', count(l2.from_tunnel)],
-      ['Drops / rejects', count(drops)], ['Orphan frames', count(l2.orphans)],
-    ], 'Drop total combines storm, MAC limit, blocked, switch, queue and oversize counters.'));
+      ['State', l2.up ? 'up' : 'down'], ['MAC table', count(l2.fdb_size)], ['Learned', count(l2.learned)], ['Moves', count(l2.moves)], ['Aged out', count(l2.aged)],
+      ['Forwarded', count(l2.forwarded)], ['Flooded', count(l2.flooded)], ['Frames to exit', count(l2.to_tunnel)], ['Frames from exit', count(l2.from_tunnel)], ['Orphan frames', count(l2.orphans)],
+    ], 'Orphans are L2 payloads that arrived with no bridge up yet.'));
+    // Every drop reason the switch tracks, not a single lumped total: a blocked port and a storm
+    // limit need different fixes, and lumping them hides which one is actually happening.
+    const dropReasons = [
+      ['drop_storm', 'Storm limit'], ['drop_mac_limit', 'MAC limit'], ['drop_blocked', 'Port blocked'], ['drop_isolated', 'PVLAN isolated'],
+      ['drop_vlan', 'VLAN mismatch'], ['drop_bpdu_guard', 'BPDU guard'], ['drop_rstp', 'RSTP not forwarding'], ['drop_ra_guard', 'RA guard'],
+      ['drop_source_guard', 'Source guard'], ['drop_copp', 'Control-plane limit'], ['drop_unauthorized', '802.1X unauthorized'], ['drop_other', 'Other'],
+      ['switch_drops', 'Classify/queue error'], ['queue_full', 'Tunnel queue full'], ['oversize', 'Oversize frame'], ['write_errors', 'Adapter write error'],
+    ].map(([key, label]) => [label, Number(l2[key]) || 0]).filter(([, v]) => v > 0);
+    const dropCard = element('section', null, { class: 'topo-metric-card' });
+    dropCard.append(element('h3', 'Layer 2 bridge · drops by reason'));
+    if (dropReasons.length) {
+      const list = element('div');
+      for (const [label, v] of dropReasons.sort((a, b) => b[1] - a[1])) list.append(element('div', label + ': ' + count(v), { class: 'topo-network-row' }));
+      dropCard.append(list);
+    } else dropCard.append(element('p', 'No drops of any kind since the client started.', { class: 'topo-metric-note' }));
+    topoNetworkMetrics.append(dropCard);
+    const frames = l2.frames || {}, top = Object.entries(frames).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    if (top.length) {
+      const frameCard = element('section', null, { class: 'topo-metric-card' });
+      frameCard.append(element('h3', 'Layer 2 bridge · frames by verdict and class'));
+      for (const [key, v] of top) frameCard.append(element('div', key + ': ' + count(v), { class: 'topo-network-row' }));
+      topoNetworkMetrics.append(frameCard);
+    }
+    if (Array.isArray(l2.recent) && l2.recent.length) {
+      const details = element('details', null, { class: 'topo-metric-card' });
+      details.append(element('summary', 'Layer 2 bridge · recent frames (' + l2.recent.length + ')'));
+      const pre = element('pre', l2.recent.join('\n'), { class: 'topo-frame-log' });
+      details.append(pre);
+      topoNetworkMetrics.append(details);
+    }
   }
   if (!networks.length && !current?.l2_bridge) topoNetworkMetrics.append(element('p', 'No local L2 bridge or routed local networks are active.', { class: 'notice' }));
 }

@@ -244,8 +244,11 @@ func (b *L2Bridge) Stats() map[string]any {
 	m := map[string]any{
 		"name": b.cfg.Name, "to_tunnel": b.toTunnel.Load(), "from_tunnel": b.fromTunnel.Load(),
 		"oversize": b.oversize.Load(), "queue_full": b.queueFull.Load(), "switch_drops": b.switchDrops.Load(), "write_errors": b.writeErr.Load(),
-		"fdb_size": st.FDBSize, "learned": st.Learned, "moves": st.Moves, "flooded": st.Flooded, "forwarded": st.Forwarded,
-		"drop_storm": st.DropStorm, "drop_mac_limit": st.DropMACLimit, "drop_blocked": st.DropBlocked, "loop_holds": st.LoopHolds,
+		"fdb_size": st.FDBSize, "learned": st.Learned, "moves": st.Moves, "aged": st.Aged, "flooded": st.Flooded, "forwarded": st.Forwarded,
+		"drop_storm": st.DropStorm, "drop_mac_limit": st.DropMACLimit, "drop_blocked": st.DropBlocked, "drop_isolated": st.DropIsolated,
+		"drop_other": st.DropOther, "drop_bpdu_guard": st.DropBPDUGuard, "drop_vlan": st.DropVLAN, "drop_ra_guard": st.DropRAGuard,
+		"drop_source_guard": st.DropSourceGuard, "drop_copp": st.DropCoPP, "drop_unauthorized": st.DropUnauthorized, "drop_rstp": st.DropRSTP,
+		"bpdu_guards": st.BPDUGuards, "loop_holds": st.LoopHolds, "multicast_groups": st.MulticastGroups, "multicast_members": st.MulticastMembers,
 	}
 	for k, v := range b.trace.snapshot() {
 		m[k] = v
