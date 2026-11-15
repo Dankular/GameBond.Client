@@ -520,11 +520,14 @@ function renderTopology() {
     topoMap.append(nodeBox(hubX, by, w, h, 'Layer 2 bridge · ' + (l2.name || 'adapter'), (l2.up ? 'up' : 'down') + ' · ' + (l2.fdb_size ?? 0) + ' MACs · ' + Math.round(r.fromFps) + '↓ ' + Math.round(r.toFps) + '↑ fps', l2.up ? 'good' : 'poor', null, false, null,
       'Frames to exit ' + (l2.to_tunnel ?? 0) + ', from exit ' + (l2.from_tunnel ?? 0) + ', flooded ' + (l2.flooded ?? 0) + ', dropped (storm/limit/blocked) ' + ((l2.drop_storm || 0) + (l2.drop_mac_limit || 0) + (l2.drop_blocked || 0))));
     if (l2Devices.length) {
+      // Bridged devices are known to the switch only by MAC; name them from the same scanner
+      // inventory the "other LAN devices" list already uses, keyed by that MAC.
+      const l2Names = new Map((deviceInventory?.devices || []).map(x => [macKey(x.mac), x.hostname || x.vendor || '']));
       const devY0 = by - (l2Devices.length - 1) * (rowGap * 0.6) / 2;
       l2Devices.forEach((d, i) => {
-        const y = devY0 + i * rowGap * 0.6;
+        const y = devY0 + i * rowGap * 0.6, name = l2Names.get(macKey(d.mac)) || d.mac;
         topoMap.append(mapLine(hubX + w, by + h / 2, devX, y + h / 2, false));
-        topoMap.append(nodeBox(devX, y, w, h, d.mac, (d.vlan ? 'VLAN ' + d.vlan + ' · ' : '') + 'seen ' + (d.age_secs ?? 0) + 's ago', 'good'));
+        topoMap.append(nodeBox(devX, y, w, h, name, d.mac + (d.vlan ? ' · VLAN ' + d.vlan : '') + ' · seen ' + (d.age_secs ?? 0) + 's ago', 'good'));
       });
       if ((l2.devices || []).length > l2Devices.length) {
         topoMap.append(svg('text', { class: 'tb-sub', x: devX, y: devY0 + l2Devices.length * rowGap * 0.6 + 14, 'font-size': 11 }, '+' + ((l2.devices || []).length - l2Devices.length) + ' more bridged devices'));
