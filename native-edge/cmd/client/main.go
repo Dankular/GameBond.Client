@@ -187,7 +187,8 @@ func backupPeers(c fileConfig, primary netip.AddrPort) ([]netip.AddrPort, error)
 func exitStatusDoc(e client.ExitStatus) map[string]any {
 	servers := make([]map[string]any, 0, len(e.Servers))
 	for _, x := range e.Servers {
-		m := map[string]any{"address": x.Addr.Addr().String(), "port": x.Addr.Port(), "active": x.Active, "state": x.State, "failures": x.Failures, "wire_tx_bytes": x.WireTX, "wire_rx_bytes": x.WireRX}
+		m := map[string]any{"address": x.Addr.Addr().String(), "port": x.Addr.Port(), "active": x.Active, "state": x.State, "failures": x.Failures, "wire_tx_bytes": x.WireTX, "wire_rx_bytes": x.WireRX,
+			"health_breaker": x.HealthBreaker, "health_samples": x.HealthSamples, "health_error_rate": x.HealthErrorRate, "health_timeout_ms": x.HealthTimeoutMS}
 		if !x.CheckedAt.IsZero() {
 			m["checked_at"] = float64(x.CheckedAt.UnixNano()) / 1e9
 		}

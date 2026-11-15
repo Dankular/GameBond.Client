@@ -1,11 +1,12 @@
-// Network Topology: a map of the exit server, bonded links, this PC and the devices behind it.
+// Network topology views: a live map of the exit server, bonded links, this PC and devices behind it,
+// plus a Docker-backed Lab designer. Both modes share one SVG canvas and node/link primitives.
 // Clicking a device opens its card. Devices that route through the tunnel have measured usage
 // (current_status.device_usage); other LAN devices are listed but their traffic is not visible.
 const topoStyle = document.createElement('style');
 topoStyle.textContent = '.subtabs{display:flex;gap:6px;margin:8px 0 12px}.subtabs .seg.active{background:#0f7ae5;color:#fff}'
   + '.topo-head{text-align:center;font-size:20px;margin:6px 0 10px}.topo-head b{font-weight:500}.topo-head .good{color:#2fb800}.topo-head .fair{color:#f5a300}.topo-head .poor{color:#e0201b}'
   + '.topo-stats{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}.topo-stat{flex:1;min-width:110px;border:1px solid #e1e5eb;border-radius:10px;padding:8px 10px;text-align:center}.topo-stat strong{display:block;font-size:22px;font-weight:500}.topo-stat span{color:#7b8089}'
-  + '.topo-svg{width:100%;height:auto;border:1px solid #e1e5eb;border-radius:10px;background:#fafbfc}.topo-node{cursor:pointer}.topo-node:focus{outline:none}.topo-node:hover rect,.topo-node:focus rect,.topo-node.sel rect{stroke:#0f7ae5;stroke-width:2}'
+  + '.topo-svg{width:100%;height:auto;border:1px solid #e1e5eb;border-radius:10px;background:#fafbfc}.topo-node{cursor:pointer}.topo-svg [data-live-node]{cursor:grab;touch-action:none}.topo-svg [data-live-node]:active{cursor:grabbing}.topo-node:focus{outline:none}.topo-node:hover rect,.topo-node:focus rect,.topo-node.sel rect{stroke:#0f7ae5;stroke-width:2}'
   + '.dev-card{border:1px solid #e1e5eb;border-radius:10px;padding:14px 16px;margin:14px 0}.dev-card h2{margin:0 0 2px;font-size:16px;display:flex;gap:10px;align-items:center}.dev-card .sub{color:#7b8089;margin:0 0 10px}'
   + '.chip{font-size:11px;border-radius:10px;padding:1px 8px;background:#e8edf3;color:#505762}.chip.good{background:#dff6d5;color:#2a7a00}.chip.poor{background:#fde0df;color:#a8120e}'
   + '.dev-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}.dev-grid>div{min-width:0}.dev-grid h3{margin:0 0 6px;font-size:12px;text-transform:uppercase;color:#7b8089;font-weight:500}'
@@ -45,37 +46,40 @@ function ago(unix) {
   return s < 90 ? Math.round(s) + ' s ago' : s < 5400 ? Math.round(s / 60) + ' min ago' : s < 172800 ? (s / 3600).toFixed(1) + ' h ago' : Math.round(s / 86400) + ' d ago';
 }
 
-// Split the views of the Network tab: the existing device list, the live topology map, and
-// (separately, since it is an authoring tool rather than a live view) the lab designer.
-const topoPane = element('div'), devicesPane = element('div'), labPane = element('div');
+// Devices remains its own view. Live and Lab share one topology pane and canvas while
+// keeping separate data sources and mode-specific controls.
+const topoPane = element('div'), devicesPane = element('div');
 devicesPane.append(...Array.from(scanPanel.children).slice(1));
 const subTabs = element('div', null, { class: 'subtabs', role: 'tablist' });
-const subDevices = element('button', 'Devices', { class: 'seg active', role: 'tab' }), subTopology = element('button', 'Topology', { class: 'seg', role: 'tab' }), subLab = element('button', 'Lab', { class: 'seg', role: 'tab' });
-subTabs.append(subDevices, subTopology, subLab);
-scanPanel.append(subTabs, devicesPane, topoPane, labPane);
-let scannerSub = 'devices';
+const subDevices = element('button', 'Devices', { class: 'seg active', role: 'tab' }), subTopology = element('button', 'Topology', { class: 'seg', role: 'tab' });
+subTabs.append(subDevices, subTopology);
+scanPanel.append(subTabs, devicesPane, topoPane);
+let scannerSub = 'devices', topologyMode = 'live';
 function showScannerSub(which) {
   scannerSub = which;
-  devicesPane.hidden = which !== 'devices'; topoPane.hidden = which !== 'topology'; labPane.hidden = which !== 'lab';
-  subDevices.classList.toggle('active', which === 'devices'); subTopology.classList.toggle('active', which === 'topology'); subLab.classList.toggle('active', which === 'lab');
-  subDevices.setAttribute('aria-selected', which === 'devices'); subTopology.setAttribute('aria-selected', which === 'topology'); subLab.setAttribute('aria-selected', which === 'lab');
+  devicesPane.hidden = which !== 'devices'; topoPane.hidden = which !== 'topology';
+  subDevices.classList.toggle('active', which === 'devices'); subTopology.classList.toggle('active', which === 'topology');
+  subDevices.setAttribute('aria-selected', which === 'devices'); subTopology.setAttribute('aria-selected', which === 'topology');
   if (which === 'topology') renderTopology();
 }
 subDevices.onclick = () => showScannerSub('devices');
 subTopology.onclick = () => showScannerSub('topology');
-subLab.onclick = () => showScannerSub('lab');
 showScannerSub('devices');
 
+const topoModeBar = element('div', null, { class: 'subtabs topo-mode-switch', role: 'group', 'aria-label': 'Topology view' });
+const liveModeButton = element('button', 'Live', { class: 'seg active', 'aria-pressed': 'true' }), labModeButton = element('button', 'Lab', { class: 'seg', 'aria-pressed': 'false' });
+topoModeBar.append(liveModeButton, labModeButton);
 const topoHead = element('div', null, { class: 'topo-head', role: 'status' });
 const topoStats = element('div', null, { class: 'topo-stats' });
 const topoMap = svg('svg', { class: 'topo-svg', viewBox: '0 0 1060 360', role: 'group', 'aria-label': 'Network topology' });
 const topoCard = element('div');
 const topoNetworkMetrics = element('div', null, { class: 'topo-network-metrics' });
 const topoPies = element('div', null, { class: 'topo-pies' });
-topoPane.append(topoHead, topoStats, topoMap, topoNetworkMetrics, topoPies, topoCard);
+const liveChrome = element('div'); liveChrome.append(topoNetworkMetrics, topoPies, topoCard);
+topoPane.append(topoModeBar, topoHead, topoStats, topoMap, liveChrome);
 
-// A small authoring surface built from the same SVG and node-card primitives as
-// the live map. Desired state is saved by the server portal, never in the status view.
+// Lab authoring controls use the shared topology canvas and visual primitives. Desired state is
+// saved by the server portal, never in the live status view.
 const labStyle = document.createElement('style');
 labStyle.textContent = '.lab-editor{margin:18px 0;padding:14px;border:1px solid #d9dfe7;border-radius:10px}.lab-toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}.lab-toolbar button,.lab-editor button{cursor:pointer}.lab-canvas{width:100%;height:auto;min-height:300px;border:1px solid #e1e5eb;border-radius:8px;background-color:#fbfcfe;background-image:radial-gradient(#dce2ea 1px,transparent 1px);background-size:18px 18px;touch-action:none}.lab-node{cursor:grab}.lab-node:active{cursor:grabbing}.lab-selected rect{stroke:#0f7ae5;stroke-width:3}.lab-props{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}.lab-props input,.lab-props select{padding:6px;border:1px solid #cfd5dd;border-radius:5px}.lab-msg{margin:8px 0;color:#505762;min-height:1.2em}.lab-msg.error{color:#a8120e}.lab-link{stroke:#687486;stroke-width:3;cursor:pointer}.lab-link.sel{stroke:#0f7ae5;stroke-width:5}.lab-help{font-size:12px;color:#7b8089}';
 document.head.append(labStyle);
@@ -86,10 +90,22 @@ const labNew = element('button', 'New topology'), labAddHost = element('button',
 const labName = document.createElement('input'); labName.placeholder = 'Topology name'; labName.value = 'New lab'; labName.maxLength = 128;
 const labToolbarStatus = element('span', '', { class: 'lab-help' });
 labToolbar.append(labName, labNew, labAddHost, labAddRouter, labAddSwitch, labLinkMode, labAddCheck, labRunChecks, labSave, labLoad, labApply, labRollback, labToolbarStatus);
-const labCanvas = svg('svg', { class: 'lab-canvas', viewBox: '0 0 1060 460', role: 'group', 'aria-label': 'Editable lab topology' });
+const labCanvas = topoMap;
 const labAssertions = element('div', null, { class: 'lab-toolbar' }), labProps = element('div', null, { class: 'lab-props' }), labMessage = element('div', null, { class: 'lab-msg', role: 'status' });
-labEditor.append(labToolbar, labCanvas, labAssertions, labProps, labMessage, element('p', 'Choose Draw link, then select two nodes. Drag nodes to arrange them. Impairments apply in real time when the lab runtime is available.', { class: 'lab-help' }));
-labPane.append(labEditor);
+labEditor.append(labToolbar, labAssertions, labProps, labMessage, element('p', 'Choose Draw link, then select two nodes. Drag nodes to arrange them. Impairments apply in real time when the lab runtime is available.', { class: 'lab-help' }));
+topoPane.append(labEditor);
+function setTopologyMode(mode) {
+  topologyMode = mode;
+  const isLive = mode === 'live';
+  liveModeButton.classList.toggle('active', isLive); labModeButton.classList.toggle('active', !isLive);
+  liveModeButton.setAttribute('aria-pressed', String(isLive)); labModeButton.setAttribute('aria-pressed', String(!isLive));
+  liveChrome.hidden = !isLive; labEditor.hidden = isLive;
+  topoMap.setAttribute('aria-label', isLive ? 'Live network topology' : 'Editable lab topology');
+  topoMap.classList.toggle('lab-canvas', !isLive);
+  if (isLive) renderTopology(); else labRender();
+}
+liveModeButton.onclick = () => setTopologyMode('live');
+labModeButton.onclick = () => setTopologyMode('lab');
 let labTopology = { version: 1, id: 'new-lab', name: 'New lab', nodes: [], links: [] }, labSelected = null, labMode = 'select', labLinkStart = null, labDrag = null, labRuntimeStatus = null;
 const labInterfaceFaults = new Map();
 function labSay(message, error = false) { labMessage.textContent = message; labMessage.classList.toggle('error', error); }
@@ -108,14 +124,18 @@ function labInterface(node) {
   return id;
 }
 function labRender() {
+  if (topologyMode !== 'lab') return;
   labTopology.name = labName.value || labTopology.name;
   labCanvas.replaceChildren();
+  labCanvas.setAttribute('viewBox', '0 0 1060 460');
   for (const link of labTopology.links) {
     const a = labTopology.nodes.find(n => n.id === link.a.node), b = labTopology.nodes.find(n => n.id === link.b.node); if (!a || !b) continue;
-    const line = svg('line', { x1: a.position.x + 70, y1: a.position.y + 32, x2: b.position.x + 70, y2: b.position.y + 32, class: 'lab-link' + (labSelected?.kind === 'link' && labSelected.id === link.id ? ' sel' : '') });
+    const line = mapLine(a.position.x + 70, a.position.y + 32, b.position.x + 70, b.position.y + 32, false, null, null);
+    line.classList.add('lab-link'); if (labSelected?.kind === 'link' && labSelected.id === link.id) line.classList.add('sel');
     const linkStats = labRuntimeStatus?.links?.[link.id] || {}, rate = Number(linkStats.bps ?? linkStats.tx_bps ?? linkStats.bytes_per_second * 8) || 0;
-    line.style.strokeWidth = String(2 + 5 * flowIntensity(rate));
-    if (linkStats.up === false) line.style.stroke = '#e0201b'; else if (rate > 0) line.style.stroke = '#0f7ae5';
+    const renderedLine = line.querySelector('line');
+    renderedLine.style.strokeWidth = String(2 + 5 * flowIntensity(rate));
+    if (linkStats.up === false) renderedLine.style.stroke = '#e0201b'; else if (rate > 0) renderedLine.style.stroke = '#0f7ae5';
     line.onclick = () => { labSelected = { kind: 'link', id: link.id }; labRender(); }; labCanvas.append(line);
     labCanvas.append(svg('text', { x: (a.position.x + b.position.x) / 2 + 60, y: (a.position.y + b.position.y) / 2 + 20, 'font-size': 11, 'text-anchor': 'middle', fill: '#505762' }, (link.impairment?.latency_ms || 0) + ' ms · ' + (link.impairment?.loss_pct || 0) + '% loss'));
   }
@@ -176,7 +196,7 @@ labApply.onclick = async () => { labTopology.name = labName.value.trim(); try { 
 labRollback.onclick = async () => { try { await api('labs', 'POST', { action: 'rollback' }); labSay('Previous topology restored.'); await labRefresh(); } catch (e) { labSay(e.message, true); } };
 async function labRefresh() { try { labRuntimeStatus = await api('labs?view=status'); labRender(); } catch (_) { /* Status is optional until a runtime backend is configured. */ } }
 labRender();
-setInterval(() => { if (scannerSub === 'topology' && $('scanner').classList.contains('active')) labRefresh(); }, 3000);
+setInterval(() => { if (scannerSub === 'topology' && topologyMode === 'lab' && $('scanner').classList.contains('active')) labRefresh(); }, 3000);
 
 let selectedDevice = null, usageRange = 60;
 const linkRates = new Map(); // slot -> { at, tx, rx, txBps, rxBps }
@@ -354,6 +374,65 @@ function nodeBox(x, y, w, h, title, subtitle, state, onActivate, selected, extra
   }
   return g;
 }
+const liveLayoutKey = 'gamebond.liveTopology.positions.v1';
+let livePositions = new Map();
+try {
+  const saved = JSON.parse(localStorage.getItem(liveLayoutKey) || '{}');
+  for (const [id, p] of Object.entries(saved)) if (Number.isFinite(p?.x) && Number.isFinite(p?.y)) livePositions.set(id, p);
+} catch (_) { /* Layout preference is optional when storage is unavailable. */ }
+let liveDrag = null;
+function liveNodeBox(id, x, y, w, h, ...args) {
+  const saved = livePositions.get(id), px = saved?.x ?? x, py = saved?.y ?? y;
+  const g = nodeBox(px, py, w, h, ...args);
+  g.dataset.liveNode = id; g.dataset.baseX = x; g.dataset.baseY = y; g.dataset.width = w; g.dataset.height = h;
+  g.setAttribute('aria-description', 'Drag to change layout. Position is saved on this device.');
+  g.addEventListener('pointerdown', e => {
+    if (topologyMode !== 'live' || e.button !== 0 || e.target.closest('a,button')) return;
+    const pt = topoMap.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+    const p = pt.matrixTransform(topoMap.getScreenCTM().inverse());
+    liveDrag = { id, dx: p.x - px, dy: p.y - py, pointerId: e.pointerId };
+    topoMap.setPointerCapture(e.pointerId); e.preventDefault();
+  });
+  return g;
+}
+function saveLivePositions() {
+  try { localStorage.setItem(liveLayoutKey, JSON.stringify(Object.fromEntries(livePositions))); } catch (_) { /* Layout preference is optional. */ }
+}
+topoMap.addEventListener('pointermove', e => {
+  if (!liveDrag || liveDrag.pointerId !== e.pointerId || topologyMode !== 'live') return;
+  const pt = topoMap.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+  const p = pt.matrixTransform(topoMap.getScreenCTM().inverse());
+  livePositions.set(liveDrag.id, { x: Math.max(0, Math.min(880, p.x - liveDrag.dx)), y: Math.max(0, Math.min(10000, p.y - liveDrag.dy)) });
+  renderTopology();
+});
+function finishLiveDrag(e) {
+  if (!liveDrag || e.pointerId !== liveDrag.pointerId) return;
+  liveDrag = null; saveLivePositions();
+}
+topoMap.addEventListener('pointerup', finishLiveDrag);
+topoMap.addEventListener('pointercancel', finishLiveDrag);
+function syncLiveEdges() {
+  const nodes = [...topoMap.querySelectorAll('[data-live-node]')].map(g => ({
+    x: Number(g.dataset.baseX), y: Number(g.dataset.baseY), w: Number(g.dataset.width), h: Number(g.dataset.height),
+    px: Number(g.getAttribute('transform').match(/translate\(([^,]+)/)?.[1]),
+    py: Number(g.getAttribute('transform').match(/,([^)]*)\)/)?.[1])
+  }));
+  const moveEndpoint = (x, y) => {
+    let best = null, distance = Infinity;
+    for (const n of nodes) {
+      const cx = Math.max(n.x, Math.min(n.x + n.w, x)), cy = Math.max(n.y, Math.min(n.y + n.h, y));
+      const d = Math.hypot(cx - x, cy - y);
+      if (d < distance) { best = { x: n.px + (x - n.x), y: n.py + (y - n.y) }; distance = d; }
+    }
+    return distance <= 5 ? best : { x, y };
+  };
+  for (const line of topoMap.querySelectorAll('line')) {
+    const x1 = Number(line.getAttribute('x1')), y1 = Number(line.getAttribute('y1'));
+    const x2 = Number(line.getAttribute('x2')), y2 = Number(line.getAttribute('y2'));
+    const a = moveEndpoint(x1, y1), b = moveEndpoint(x2, y2);
+    line.setAttribute('x1', a.x); line.setAttribute('y1', a.y); line.setAttribute('x2', b.x); line.setAttribute('y2', b.y);
+  }
+}
 // Traffic intensity 0..1 on a log scale: ~10 kbps is a faint trickle, 100 Mbps is full.
 function flowIntensity(bps) {
   bps = Number(bps) || 0;
@@ -521,6 +600,7 @@ function throughputChart(history, latency, minutes, dir) {
 }
 
 function renderTopology() {
+  if (topologyMode !== 'live') return;
   if (!current || current.state === 'unavailable' && !current.transport) { topoHead.textContent = 'Status unavailable'; return; }
   const paths = current?.transport?.paths || [], { routed, others, extra } = topologyDevices();
   const l2All = current?.l2_bridge, bridgedDevices = l2All?.devices || [];
@@ -551,24 +631,25 @@ function renderTopology() {
   const eh = 72, ey = midY + h / 2 - eh / 2, eg = eh + 12; // exit nodes carry rate and total lines, so they are taller
   const exitLines = x => {
     const r = exitRates.get(x.address) || {};
-    return ['↓ ' + fmtBps(r.rxBps) + '  ↑ ' + fmtBps(r.txBps), 'total ↓ ' + bytes(x.wire_rx_bytes) + '  ↑ ' + bytes(x.wire_tx_bytes)];
+    const health = x.health_breaker ? x.health_breaker + ' · ' + Number(x.health_timeout_ms || 0).toFixed(0) + ' ms timeout' : 'health warming up';
+    return ['↓ ' + fmtBps(r.rxBps) + '  ↑ ' + fmtBps(r.txBps), 'total ↓ ' + bytes(x.wire_rx_bytes) + '  ↑ ' + bytes(x.wire_tx_bytes), health];
   };
   const activeX = (exit?.servers || []).find(x => x.active) || { address: exit?.active || '', wire_rx_bytes: 0, wire_tx_bytes: 0 };
-  const server = nodeBox(serverX, ey, w, eh, exit && standbys.length ? (onBackup ? 'Exit server · backup' : 'Exit server · primary') : 'Exit server', exit?.active || (current?.peer ? current.peer[0] : ''), exit?.searching ? 'fair' : health === 'poor' ? 'poor' : onBackup ? 'fair' : 'good', null, false, exitLines(activeX));
-  const pc = nodeBox(pcX, midY, w, h, 'This PC', 'GameBond client', 'good');
+  const server = liveNodeBox('exit:active', serverX, ey, w, eh, exit && standbys.length ? (onBackup ? 'Exit server · backup' : 'Exit server · primary') : 'Exit server', exit?.active || (current?.peer ? current.peer[0] : ''), exit?.searching ? 'fair' : health === 'poor' ? 'poor' : onBackup ? 'fair' : 'good', null, false, exitLines(activeX));
+  const pc = liveNodeBox('client:local', pcX, midY, w, h, 'This PC', 'GameBond client', 'good');
   topoMap.append(server, pc);
   // Standby exits hang under the active one, dashed: they carry nothing until the active exit stops answering.
   standbys.forEach((x, i) => {
     const y = ey + (i + 1) * eg, state = x.state === 'reachable' ? 'good' : x.state === 'unreachable' ? 'poor' : 'neutral';
     const label = x.state === 'reachable' ? 'standby · ' + Math.round(x.handshake_ms) + ' ms' : x.state === 'unreachable' ? 'standby · no answer' : 'standby · not probed';
-    topoMap.append(mapLine(serverX + w / 2, (i ? y - eg + eh : ey + eh), serverX + w / 2, y, true), nodeBox(serverX, y, w, eh, 'Standby ' + x.address, label, state, null, false, exitLines(x)));
+    topoMap.append(mapLine(serverX + w / 2, (i ? y - eg + eh : ey + eh), serverX + w / 2, y, true), liveNodeBox('exit:standby:' + x.address, serverX, y, w, eh, 'Standby ' + x.address, label, state, null, false, exitLines(x)));
   });
   const linkY0 = midY + h / 2 - (paths.length - 1) * rowGap / 2 - h / 2;
   paths.forEach((p, i) => {
     const y = linkY0 + i * rowGap, r = linkRates.get(p.slot) || {};
     const fl = { down: r.rxBps || 0, up: r.txBps || 0 };
     topoMap.append(mapLine(serverX + w, midY + h / 2, linkX, y + h / 2, false, null, fl), mapLine(linkX + w, y + h / 2, pcX, midY + h / 2, false, null, fl));
-    topoMap.append(nodeBox(linkX, y, w, h, 'Link ' + (p.slot + 1) + (p.slot === 0 ? ' · Ethernet' : p.slot === 1 ? ' · Hotspot' : ''), '↓ ' + fmtBps(r.rxBps) + '  ↑ ' + fmtBps(r.txBps) + (p.rtt_ms != null ? '  ' + Math.round(p.rtt_ms) + ' ms' : ''), p.healthy ? 'good' : 'poor'));
+    topoMap.append(liveNodeBox('path:' + p.slot, linkX, y, w, h, 'Link ' + (p.slot + 1) + (p.slot === 0 ? ' · Ethernet' : p.slot === 1 ? ' · Hotspot' : ''), '↓ ' + fmtBps(r.rxBps) + '  ↑ ' + fmtBps(r.txBps) + (p.rtt_ms != null ? '  ' + Math.round(p.rtt_ms) + ' ms' : ''), p.healthy ? 'good' : 'poor'));
   });
   // Devices sharing one physical adapter (an access point or switch on it) hang off one adapter node,
   // so the traffic through that adapter is visible as a whole. Other LAN devices attach to the PC.
@@ -581,20 +662,20 @@ function renderTopology() {
   for (const hub of hubs) {
     const ys = hub.devices.map(d => placed.get(d.key)), hy = (Math.min(...ys) + Math.max(...ys)) / 2;
     topoMap.append(mapLine(pcX + w, midY + h / 2, hubX, hy + h / 2, false, null, { down: hub.down, up: hub.upBps }));
-    topoMap.append(nodeBox(hubX, hy, w, h, hub.name + ' · ' + hub.devices.length + (hub.devices.length === 1 ? ' device' : ' devices'), '↓ ' + fmtBps(hub.down) + '  ↑ ' + fmtBps(hub.upBps), hub.up ? 'good' : 'poor', () => { selectedDevice = hub.key; renderTopology(); }, selectedDevice === hub.key));
+    topoMap.append(liveNodeBox('adapter:' + hub.mac, hubX, hy, w, h, hub.name + ' · ' + hub.devices.length + (hub.devices.length === 1 ? ' device' : ' devices'), '↓ ' + fmtBps(hub.down) + '  ↑ ' + fmtBps(hub.upBps), hub.up ? 'good' : 'poor', () => { selectedDevice = hub.key; renderTopology(); }, selectedDevice === hub.key));
     for (const d of hub.devices) {
       const y = placed.get(d.key);
       topoMap.append(mapLine(hubX + w, hy + h / 2, devX, y + h / 2, false, null, { down: d.usage?.down_bps || 0, up: d.usage?.up_bps || 0 }));
       const sub = d.usage ? '↓ ' + fmtBps(d.usage.down_bps) + '  ↑ ' + fmtBps(d.usage.up_bps) : d.ip;
       const ap = activePorts(d.usage);
       // Taller than the other nodes but centred on the same row, so the connector still meets its middle.
-      topoMap.append(nodeBox(devX, y - (dh - h) / 2, w, dh, d.name, sub, d.up && d.present !== false ? 'good' : 'poor', () => { selectedDevice = d.key; renderTopology(); }, selectedDevice === d.key, ap.line, ap.tip));
+      topoMap.append(liveNodeBox('device:' + d.key, devX, y - (dh - h) / 2, w, dh, d.name, sub, d.up && d.present !== false ? 'good' : 'poor', () => { selectedDevice = d.key; renderTopology(); }, selectedDevice === d.key, ap.line, ap.tip));
     }
   }
   for (const d of others) {
     const y = placed.get(d.key);
     topoMap.append(mapLine(pcX + w, midY + h / 2, devX, y + h / 2, true));
-    topoMap.append(nodeBox(devX, y, w, h, d.name, d.ip + ' · not routed', 'idle', () => { selectedDevice = d.key; renderTopology(); }, selectedDevice === d.key));
+    topoMap.append(liveNodeBox('device:' + d.key, devX, y, w, h, d.name, d.ip + ' · not routed', 'idle', () => { selectedDevice = d.key; renderTopology(); }, selectedDevice === d.key));
   }
   if (extra) topoMap.append(svg('text', { class: 'tb-sub', x: devX, y: height - 8, 'font-size': 11 }, '+' + extra + ' more LAN devices (see the Devices tab)'));
   if (!all.length) topoMap.append(svg('text', { class: 'tb-sub', x: devX, y: midY + 28, 'font-size': 12 }, 'No devices seen yet'));
@@ -608,9 +689,9 @@ function renderTopology() {
     const r = l2Rates(l2), by = height - 62;
     const gwY = ey + eh + 12 + standbys.length * eg;
     topoMap.append(mapLine(serverX + w / 2, ey + eh, serverX + w / 2, gwY + h / 2, true));
-    topoMap.append(nodeBox(serverX, gwY, w, h, 'Exit gateway · 10.78.0.1', 'userspace gVisor · ARP, DHCP, NAT-free', l2.up ? 'good' : 'idle'));
+    topoMap.append(liveNodeBox('exit:gateway', serverX, gwY, w, h, 'Exit gateway · 10.78.0.1', 'userspace gVisor · ARP, DHCP, NAT-free', l2.up ? 'good' : 'idle'));
     topoMap.append(mapLine(pcX + w, midY + h / 2, hubX, by + h / 2, false, null, { down: r.fromFps * 1000, up: r.toFps * 1000 }));
-    topoMap.append(nodeBox(hubX, by, w, h, 'Layer 2 bridge · ' + (l2.name || 'adapter'), (l2.up ? 'up' : 'down') + ' · ' + (l2.fdb_size ?? 0) + ' MACs · ' + Math.round(r.fromFps) + '↓ ' + Math.round(r.toFps) + '↑ fps', l2.up ? 'good' : 'poor', null, false, null,
+    topoMap.append(liveNodeBox('bridge:local', hubX, by, w, h, 'Layer 2 bridge · ' + (l2.name || 'adapter'), (l2.up ? 'up' : 'down') + ' · ' + (l2.fdb_size ?? 0) + ' MACs · ' + Math.round(r.fromFps) + '↓ ' + Math.round(r.toFps) + '↑ fps', l2.up ? 'good' : 'poor', null, false, null,
       'Frames to exit ' + (l2.to_tunnel ?? 0) + ', from exit ' + (l2.from_tunnel ?? 0) + ', flooded ' + (l2.flooded ?? 0) + ', dropped (storm/limit/blocked) ' + ((l2.drop_storm || 0) + (l2.drop_mac_limit || 0) + (l2.drop_blocked || 0))));
     if (l2Devices.length) {
       // Bridged devices are known to the switch only by MAC. The scanner's passive neighbor cache
@@ -622,7 +703,7 @@ function renderTopology() {
       l2Devices.forEach((d, i) => {
         const y = devY0 + i * rowGap * 0.6, resolved = l2Names.get(macKey(d.mac));
         topoMap.append(mapLine(hubX + w, by + h / 2, devX, y + h / 2, false));
-        topoMap.append(nodeBox(devX, y, w, h, d.mac, (resolved ? resolved + ' · ' : '') + (d.age_secs ?? 0) + 's ago' + (d.vlan ? ' · VLAN ' + d.vlan : ''), 'good'));
+        topoMap.append(liveNodeBox('bridge-device:' + macKey(d.mac), devX, y, w, h, d.mac, (resolved ? resolved + ' · ' : '') + (d.age_secs ?? 0) + 's ago' + (d.vlan ? ' · VLAN ' + d.vlan : ''), 'good'));
       });
       if ((l2.devices || []).length > l2Devices.length) {
         topoMap.append(svg('text', { class: 'tb-sub', x: devX, y: devY0 + l2Devices.length * rowGap * 0.6 + 14, 'font-size': 11 }, '+' + ((l2.devices || []).length - l2Devices.length) + ' more bridged devices'));
@@ -632,6 +713,7 @@ function renderTopology() {
       topoMap.append(svg('text', { class: 'tb-sub', x: devX, y: by + h / 2 + 4, 'font-size': 11 }, 'No devices learned yet'));
     }
   }
+  syncLiveEdges();
   const hub = hubs.find(g => g.key === selectedDevice);
   if (hub) renderAdapterCard(hub); else renderDeviceCard(all.find(d => d.key === selectedDevice));
 }

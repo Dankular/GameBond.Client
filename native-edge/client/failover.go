@@ -48,6 +48,16 @@ const (
 	// before the fast threshold is trusted.
 	gapSeconds  = 30
 	fastSamples = 3
+	// Exit health uses bounded rolling evidence. Ten observations are enough to begin
+	// judging a path; a single late response never opens the circuit.
+	exitHealthWindow     = 50
+	exitHealthMinSamples = 10
+)
+
+const (
+	exitHealthBaseBackoff = 10 * time.Second
+	exitHealthMaxBackoff  = 5 * time.Minute
+	maxAdaptiveTimeout    = 5 * time.Second
 )
 
 // Probe timing; variables so tests can shorten them. probeFirst delays building the warm standbys at
@@ -134,6 +144,11 @@ type ExitServer struct {
 	WireTX, WireRX uint64
 	// RTTMS is the smoothed round-trip time to this exit over its best path; 0 when not measured.
 	RTTMS float64
+	// HealthBreaker, HealthErrorRate and HealthTimeoutMS expose the exit's rolling failure evidence.
+	HealthBreaker   string
+	HealthSamples   int
+	HealthErrorRate float64
+	HealthTimeoutMS float64
 }
 
 // ExitStatus describes the exit servers and the failovers so far.
@@ -157,6 +172,92 @@ type exitInfo struct {
 	checked     time.Time
 	failures    uint64
 	rtt         float64 // last smoothed RTT seen for this exit (kept when it stops being measured)
+	health      exitCircuit
+}
+
+type exitCircuit struct {
+	outcomes   [exitHealthWindow]bool
+	pos        int
+	filled     int
+	failures   int
+	state      string // closed, open, or half-open
+	backoff    time.Duration
+	openUntil  time.Time
+	probeFrom  time.Time
+	probeUntil time.Time
+	nextSample time.Time
+}
+
+// observe uses authenticated traffic as the probe: a response received after entering
+// half-open closes the circuit; silence through the adaptive deadline reopens it.
+func (b *exitCircuit) observe(now, lastAuth time.Time, timeout time.Duration) {
+	if b.state == "" {
+		b.state, b.backoff = "closed", exitHealthBaseBackoff
+	}
+	switch b.state {
+	case "open":
+		if now.Before(b.openUntil) {
+			return
+		}
+		b.state, b.probeFrom, b.probeUntil = "half-open", lastAuth, now.Add(timeout)
+		return
+	case "half-open":
+		if lastAuth.After(b.probeFrom) {
+			b.state, b.backoff = "closed", exitHealthBaseBackoff
+			b.resetWindow()
+			return
+		}
+		if !now.Before(b.probeUntil) {
+			b.backoff = min(b.backoff*2, exitHealthMaxBackoff)
+			b.state, b.openUntil = "open", now.Add(b.backoff)
+		}
+		return
+	}
+	interval := min(max(timeout/4, 100*time.Millisecond), 500*time.Millisecond)
+	if !b.nextSample.IsZero() && now.Before(b.nextSample) {
+		return
+	}
+	b.nextSample = now.Add(interval)
+	ok := !lastAuth.IsZero() && now.Sub(lastAuth) <= timeout
+	if b.filled == exitHealthWindow && !b.outcomes[b.pos] {
+		b.failures--
+	}
+	b.outcomes[b.pos] = ok
+	b.pos = (b.pos + 1) % exitHealthWindow
+	if b.filled < exitHealthWindow {
+		b.filled++
+	}
+	if !ok {
+		b.failures++
+	}
+	if b.filled >= exitHealthMinSamples && b.failures*2 > b.filled {
+		b.state, b.openUntil = "open", now.Add(b.backoff)
+		b.resetWindow()
+	}
+}
+
+func (b *exitCircuit) resetWindow() {
+	b.outcomes = [exitHealthWindow]bool{}
+	b.pos, b.filled, b.failures = 0, 0, 0
+	b.nextSample = time.Time{}
+}
+
+// adaptiveTimeout gives slow paths three EWMA round trips plus a 50 ms margin,
+// while keeping the configured failover delay as a floor and bounding the result.
+func adaptiveTimeout(rttMS float64, configured time.Duration) time.Duration {
+	if rttMS <= 0 {
+		return configured
+	}
+	rtt := time.Duration(rttMS * float64(time.Millisecond))
+	return min(max(configured, 3*rtt+50*time.Millisecond), max(configured, maxAdaptiveTimeout))
+}
+
+func fastTimeout(rttMS float64, learned time.Duration) time.Duration {
+	if rttMS <= 0 {
+		return learned
+	}
+	rtt := time.Duration(rttMS * float64(time.Millisecond))
+	return max(learned, min(max(2*rtt+50*time.Millisecond, minFastAfter), maxAdaptiveTimeout))
 }
 
 type candidate struct {
@@ -378,14 +479,20 @@ func (c *Client) failoverTick(now time.Time) error {
 		// No adapter is up: the silence is ours, not the server's.
 		f.lastAuth, f.gapPrev = now, time.Time{}
 	}
+	activeInfo := f.info[f.servers[f.active]]
+	activeTimeout := adaptiveTimeout(f.activeRTT, f.after)
+	if anyLive {
+		activeInfo.health.observe(now, f.lastAuth, activeTimeout)
+	}
 	f.silent = now.Sub(f.lastAuth)
-	f.searching = anyLive && f.silent >= f.fast
+	fastAfter := fastTimeout(f.activeRTT, f.fast)
+	f.searching = anyLive && f.silent >= fastAfter
 	// A reconnection: every link came back, or the active exit went silent and answered again.
 	if (anyLive && !f.wasLive) || (!f.searching && f.wasSearching) {
 		f.evalAt, f.evalEnd = now.Add(evalDelay), now.Add(evalGiveUp)
 	}
 	f.wasLive, f.wasSearching = anyLive, f.searching
-	suspect := f.silent >= max(f.fast/3, 100*time.Millisecond)
+	suspect := f.silent >= max(fastAfter/3, 100*time.Millisecond)
 	if f.standby == nil && anyLive && (!now.Before(f.nextProbe) || suspect) {
 		if err := c.startStandby(now); err != nil {
 			return err
@@ -408,7 +515,7 @@ func (c *Client) failoverTick(now time.Time) error {
 		if faster(cand, slow) {
 			slow = cand
 		}
-		if now.Sub(cand.lastAuth) <= aliveWithin && faster(cand, fast) {
+		if now.Sub(cand.lastAuth) <= max(aliveWithin, adaptiveTimeout(cand.rtt, f.after)) && faster(cand, fast) {
 			fast = cand
 		}
 	}
@@ -418,7 +525,7 @@ func (c *Client) failoverTick(now time.Time) error {
 	switch {
 	case fast != nil && f.silent >= f.fast:
 		return c.promote(fast, now, failReason(fast), true)
-	case slow != nil && f.silent >= f.after:
+	case slow != nil && f.silent >= activeTimeout && activeInfo.health.state == "open":
 		return c.promote(slow, now, failReason(slow), true)
 	}
 	if c.cfg.AutoBestExit && f.silent < f.fast && !f.evalAt.IsZero() && !now.Before(f.evalAt) {
@@ -540,6 +647,8 @@ func (c *Client) standbyTick(now time.Time) {
 			}
 		}
 		info := f.info[cand.addr]
+		candidateTimeout := adaptiveTimeout(cand.rtt, f.after)
+		info.health.observe(now, cand.lastAuth, candidateTimeout)
 		ready := cand.st.recv.ReadyPaths(now) > 0
 		switch {
 		case ready && !cand.ready:
@@ -547,6 +656,8 @@ func (c *Client) standbyTick(now time.Time) {
 			info.state, info.handshakeMS, info.checked = "reachable", float64(now.Sub(cand.started))/float64(time.Millisecond), now
 		case !ready && cand.ready:
 			cand.ready = false
+			info.state, info.checked = "suspect", now
+		case !ready && info.state == "suspect" && info.health.state == "open":
 			info.state, info.checked = "unreachable", now
 		case !ready && info.state == "unknown" && now.Sub(cand.started) >= probeTimeout:
 			info.state, info.checked = "unreachable", now
@@ -650,7 +761,12 @@ func (c *Client) exitStatus() ExitStatus {
 		LastReason: f.lastReason, SilentMS: float64(f.silent) / float64(time.Millisecond), Probing: f.searching}
 	for i, s := range f.servers {
 		info := f.info[s]
-		e := ExitServer{Addr: s, Active: i == f.active, State: info.state, HandshakeMS: info.handshakeMS, CheckedAt: info.checked, Failures: info.failures, RTTMS: info.rtt}
+		errorRate := 0.0
+		if info.health.filled > 0 {
+			errorRate = float64(info.health.failures) / float64(info.health.filled)
+		}
+		e := ExitServer{Addr: s, Active: i == f.active, State: info.state, HandshakeMS: info.handshakeMS, CheckedAt: info.checked, Failures: info.failures, RTTMS: info.rtt,
+			HealthBreaker: info.health.state, HealthSamples: info.health.filled, HealthErrorRate: errorRate, HealthTimeoutMS: float64(adaptiveTimeout(info.rtt, f.after)) / float64(time.Millisecond)}
 		if e.Active {
 			e.State = "active"
 		}
