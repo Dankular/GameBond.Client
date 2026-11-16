@@ -684,6 +684,11 @@ func (c *Client) promote(cand *candidate, now time.Time, reason string, failed b
 	f := &c.fo
 	from := f.servers[f.active]
 	old := c.receiver()
+	// Carry packet numbering, cached repairs, and held receive packets into
+	// the warmed stack before promotion. Its handshake and path state stay local.
+	if err := copyRecoveryState(c.sender, old, cand.st.sender, cand.st.recv); err != nil {
+		return fmt.Errorf("transfer packet recovery state to %s: %w", cand.addr, err)
+	}
 	old.NoteComponent("exit-node", !failed, reason)
 	dir := c.outageDirNow()
 	if dir != "" {
@@ -729,6 +734,18 @@ func (c *Client) promote(cand *candidate, now time.Time, reason string, failed b
 		c.cfg.OnSwitch(from, cand.addr, reason)
 	}
 	return nil
+}
+
+func copyRecoveryState(fromSender *bond.Sender, fromReceiver *bond.Receiver, toSender *bond.Sender, toReceiver *bond.Receiver) error {
+	if fromSender == nil || fromReceiver == nil || toSender == nil || toReceiver == nil {
+		return bond.ErrRecoveryState
+	}
+	senderState := fromSender.SnapshotState()
+	reorderState := fromReceiver.SnapshotRecoveryState()
+	if err := toSender.RestoreState(senderState); err != nil {
+		return err
+	}
+	return toReceiver.RestoreRecoveryState(reorderState)
 }
 
 // exitStatus is read by the snapshot code on the loop goroutine.
