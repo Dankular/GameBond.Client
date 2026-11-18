@@ -105,7 +105,10 @@ func (b *L2Bridge) Run(ctx context.Context) error {
 func (b *L2Bridge) ToAdapter(frame []byte) {
 	if err := b.io.Write(padWire(frame)); err != nil {
 		b.writeErr.Add(1)
+		b.trace.note("local-reply-write-error", frame)
+		return
 	}
+	b.trace.note("local-reply", frame)
 }
 
 // FromAdapter handles one frame the device sent.
