@@ -68,3 +68,24 @@ func TestL2PayloadsNeverReachTheIPStack(t *testing.T) {
 		t.Fatal("an L2 payload with no bridge up must be consumed and counted")
 	}
 }
+
+func TestL2BridgeDHCPSection(t *testing.T) {
+	good := `{"enabled":true,"interface_name":"eth1","dhcp":{"reservations":[{"mac":"02:11:22:33:44:55","ip":"10.77.0.50","name":"ps5"}],"dns":["1.1.1.1"],"lease_seconds":600}}`
+	c, err := parseL2Bridge(json.RawMessage(good))
+	if err != nil || c == nil {
+		t.Fatalf("valid dhcp section rejected: %v", err)
+	}
+	if d, err := c.gvisorDHCP(); err != nil || len(d.Reservations) != 1 || d.LeaseSeconds != 600 {
+		t.Fatalf("bad conversion: %v %v", d, err)
+	}
+	for _, bad := range []string{
+		`{"enabled":true,"interface_name":"e","dhcp":{"reservations":[]}}`,
+		`{"enabled":true,"interface_name":"e","dhcp":{"reservations":[{"mac":"zz","ip":"10.0.0.5"}]}}`,
+		`{"enabled":true,"interface_name":"e","dhcp":{"reservations":[{"mac":"02:11:22:33:44:55","ip":"::1"}]}}`,
+		`{"enabled":true,"interface_name":"e","dhcp":{"reservations":[{"mac":"01:11:22:33:44:55","ip":"10.0.0.5"}]}}`,
+	} {
+		if _, err := parseL2Bridge(json.RawMessage(bad)); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+}

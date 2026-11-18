@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Dankular/GameBond.Core/bond"
+	"gamebond.local/nativeedge/gvisorlink"
 	"gamebond.local/nativeedge/nat"
 	"gamebond.local/nativeedge/omr"
 	"gamebond.local/nativeedge/router"
@@ -35,6 +36,7 @@ type routedUplink struct {
 	deliver func([]byte)
 	ready   func() bool
 	probe   func([]byte) bool // consumes echo replies to the SLO probe
+	gvisor  atomic.Pointer[gvisorlink.Link]
 
 	mu  sync.Mutex // serialises Submit so cur is the packet being routed
 	cur bond.QueuedPacket
@@ -58,7 +60,16 @@ func (u *routedUplink) Submit(q bond.QueuedPacket) bool {
 	rt := u.rt.Load()
 	// Ethernet frames always take the bond: their first bytes are a MAC, not an IP header, so
 	// DSCP routing does not apply.
-	if rt == nil || (len(q.Payload) > 0 && q.Payload[0] == bond.L2Marker) {
+	if len(q.Payload) > 0 && q.Payload[0] == bond.L2Marker {
+		if l := u.gvisor.Load(); l != nil && l.Active() {
+			return l.SendEthernet(q)
+		}
+		return u.gb.Submit(q)
+	}
+	if l := u.gvisor.Load(); l != nil && l.Active() && l.ForwardIP(q) {
+		return true
+	}
+	if rt == nil {
 		return u.gb.Submit(q)
 	}
 	dscp := 0
@@ -73,6 +84,13 @@ func (u *routedUplink) Submit(q bond.QueuedPacket) bool {
 
 // Deliver is the client's Deliver callback.
 func (u *routedUplink) Deliver(p []byte) {
+	if len(p) > 0 && p[0] == bond.L2Marker {
+		if l := u.gvisor.Load(); l != nil && l.ReceiveEthernet(p[1:]) {
+			return
+		}
+		u.deliver(p)
+		return
+	}
 	if u.probe != nil && u.probe(p) {
 		return
 	}

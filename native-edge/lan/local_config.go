@@ -24,6 +24,10 @@ type NetworkConfig struct {
 	InterfaceName  string
 	InterfaceIndex int
 	Prefix         netip.Prefix
+	// ServerID, when valid, is the DHCP server identifier (option 54); the router option stays Prefix.Addr().
+	ServerID netip.Addr
+	// MTU, when non-zero, is advertised in option 26.
+	MTU int
 	VLANID         int
 	DHCP           *DHCPPoolConfig
 	Relay          *DHCPRelayConfig

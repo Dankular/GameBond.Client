@@ -26,7 +26,12 @@ const (
 	MaxFrameBuffer    = 9014
 	MstcpSentTunnel   = 0x1
 	MstcpRecvTunnel   = 0x2
-	TunnelMode        = MstcpSentTunnel | MstcpRecvTunnel
+	// MstcpFilterDirect keeps promiscuous frames destined for foreign MACs
+	// out of the Windows TCP/IP stack while the tunnel client still receives
+	// them through NDISRD. Without this, SIO_RCVALL makes Windows process a
+	// second copy of every bridged unicast frame.
+	MstcpFilterDirect = 0x10
+	TunnelMode        = MstcpSentTunnel | MstcpRecvTunnel | MstcpFilterDirect
 	PacketFlagOnSend  = 0x1
 	PacketFlagOnRecv  = 0x2
 	DevicePath        = `\\.\NDISRD`

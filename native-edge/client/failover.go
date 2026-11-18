@@ -113,23 +113,51 @@ func smooth(cur, sample float64) float64 {
 	return cur + rttAlpha*(sample-cur)
 }
 
-// faster reports whether a should be preferred to b: a known RTT beats an unknown one, then lower wins.
+// faster compares capacity-adjusted throughput when both exits have configured
+// capacity and measured RTT. Otherwise it preserves the legacy RTT ordering.
 func faster(a, b *candidate) bool {
 	switch {
 	case b == nil:
 		return true
-	case a.rtt <= 0:
+	}
+	if a.capacityMbps > 0 && b.capacityMbps > 0 && a.rtt > 0 && b.rtt > 0 {
+		aScore := exitPreferenceScore(a.capacityMbps, a.rtt, a.hopCount)
+		bScore := exitPreferenceScore(b.capacityMbps, b.rtt, b.hopCount)
+		if aScore != bScore {
+			return aScore > bScore
+		}
+	}
+	if a.rtt > 0 && a.rtt == b.rtt && a.hopCount > 0 && b.hopCount > 0 && a.hopCount != b.hopCount {
+		return a.hopCount < b.hopCount
+	}
+	if a.rtt <= 0 {
 		return false
-	case b.rtt <= 0:
+	}
+	if b.rtt <= 0 {
 		return true
 	}
 	return a.rtt < b.rtt
+}
+
+// exitPreferenceScore treats RTT and hop count as modest costs against configured
+// egress capacity. For example, 1 Gbps at 30 ms still outranks 100 Mbps at 5 ms.
+func exitPreferenceScore(capacityMbps, rttMS float64, hops int) float64 {
+	if capacityMbps <= 0 || rttMS <= 0 {
+		return 0
+	}
+	hopPenalty := 1.0
+	if hops > 1 {
+		hopPenalty += 0.02 * float64(hops-1)
+	}
+	return capacityMbps / (1 + rttMS/100) / hopPenalty
 }
 
 // ExitServer is one configured exit as the status document reports it.
 type ExitServer struct {
 	Addr   netip.AddrPort
 	Active bool
+	// Provisioning is the authenticated gateway/link assignment from this exit.
+	Provisioning *bond.GatewayProvisioning
 	// State is "active", "reachable" (a probe handshake completed), "unreachable" (a probe got no
 	// answer) or "unknown" (not probed yet).
 	State string
@@ -144,11 +172,26 @@ type ExitServer struct {
 	WireTX, WireRX uint64
 	// RTTMS is the smoothed round-trip time to this exit over its best path; 0 when not measured.
 	RTTMS float64
+	// CapacityMbps is the configured maximum egress capacity; 0 when unknown.
+	CapacityMbps float64
+	// HopCount is the measured route length; 0 when unknown.
+	HopCount int
+	// EffectiveMbps is the capacity/RTT/hop-adjusted selection score; 0 when not measurable.
+	EffectiveMbps float64
 	// HealthBreaker, HealthErrorRate and HealthTimeoutMS expose the exit's rolling failure evidence.
 	HealthBreaker   string
 	HealthSamples   int
 	HealthErrorRate float64
 	HealthTimeoutMS float64
+	// Flow fields describe sessions assigned to this exit while per-flow balancing is enabled.
+	FlowSessions      uint64
+	FlowTXPackets     uint64
+	FlowTXBytes       uint64
+	FlowRXPackets     uint64
+	FlowRXBytes       uint64
+	FlowMbpsOffered   float64
+	FlowReassignments uint64
+	FlowUntracked     uint64
 }
 
 // ExitStatus describes the exit servers and the failovers so far.
@@ -163,16 +206,21 @@ type ExitStatus struct {
 	// SilentMS is how long the active server has been silent right now.
 	SilentMS float64
 	// Probing is true while the client is looking for a standby because the active exit is silent.
-	Probing bool
+	Probing        bool
+	FlowBalance    bool
+	TrackedFlows   uint64
+	UntrackedFlows uint64
 }
 
 type exitInfo struct {
-	state       string
-	handshakeMS float64
-	checked     time.Time
-	failures    uint64
-	rtt         float64 // last smoothed RTT seen for this exit (kept when it stops being measured)
-	health      exitCircuit
+	state        string
+	handshakeMS  float64
+	checked      time.Time
+	failures     uint64
+	rtt          float64 // last smoothed RTT seen for this exit (kept when it stops being measured)
+	capacityMbps float64
+	hopCount     int
+	health       exitCircuit
 }
 
 type exitCircuit struct {
@@ -261,14 +309,17 @@ func fastTimeout(rttMS float64, learned time.Duration) time.Duration {
 }
 
 type candidate struct {
-	rtt      float64   // smoothed RTT over the best ready path; 0 until measured
-	rttAt    time.Time // when it was last sampled
-	addr     netip.AddrPort
-	st       *stack
-	ready    bool
-	readyAt  time.Time
-	started  time.Time // when this candidate's handshake began (reset when it is rebuilt)
-	lastAuth time.Time // the last authenticated frame from it
+	rtt          float64   // smoothed RTT over the best ready path; 0 until measured
+	capacityMbps float64   // configured maximum egress capacity; 0 when unknown
+	hopCount     int       // measured route length; 0 when unknown
+	rttAt        time.Time // when it was last sampled
+	addr         netip.AddrPort
+	st           *stack
+	ready        bool
+	readyAt      time.Time
+	started      time.Time // when this candidate's handshake began (reset when it is rebuilt)
+	lastAuth     time.Time // the last authenticated frame from it
+	nextBulk     time.Time // candidate queue's next paced release
 }
 
 // standby is the warm set: one client receiver per standby server, kept handshaken over the live
@@ -332,8 +383,23 @@ func (c *Client) initFailover(now time.Time) {
 	f.evalAt, f.evalEnd = now.Add(probeFirst+evalDelay), now.Add(probeFirst+evalGiveUp)
 	f.nextProbe = now.Add(probeFirst)
 	f.info = map[netip.AddrPort]*exitInfo{}
-	for _, s := range f.servers {
-		f.info[s] = &exitInfo{state: "unknown"}
+	if c.cfg.ExitFlowBalance {
+		c.flows = newFlowRouteTable()
+	}
+	for i, s := range f.servers {
+		capacity := 0.0
+		if i == 0 {
+			capacity = c.cfg.ExitCapacityMbps
+		} else if i-1 < len(c.cfg.BackupCapacitiesMbps) {
+			capacity = c.cfg.BackupCapacitiesMbps[i-1]
+		}
+		hops := 0
+		if i == 0 {
+			hops = c.cfg.ExitHopCount
+		} else if i-1 < len(c.cfg.BackupHopCounts) {
+			hops = c.cfg.BackupHopCounts[i-1]
+		}
+		f.info[s] = &exitInfo{state: "unknown", capacityMbps: capacity, hopCount: hops}
 	}
 	c.setServer(c.cfg.Server)
 }
@@ -358,6 +424,13 @@ func (c *Client) buildStack(server netip.AddrPort, now time.Time, plainOnly bool
 	r, err := bond.NewReceiver(codec, cfg.MTU)
 	if err != nil {
 		return nil, err
+	}
+	for local := range c.conns {
+		if cfg.ECN && c.ecnConns[local] {
+			if err = r.SetECN(local, true); err != nil {
+				return nil, err
+			}
+		}
 	}
 	r.SetVersion(buildinfo.Commit)
 	if err = r.SetPathMTUDiscovery(cfg.Discover); err != nil {
@@ -528,13 +601,14 @@ func (c *Client) failoverTick(now time.Time) error {
 	case slow != nil && f.silent >= activeTimeout && activeInfo.health.state == "open":
 		return c.promote(slow, now, failReason(slow), true)
 	}
-	if c.cfg.AutoBestExit && f.silent < f.fast && !f.evalAt.IsZero() && !now.Before(f.evalAt) {
+	if c.cfg.AutoBestExit && !c.cfg.ExitFlowBalance && f.silent < f.fast && !f.evalAt.IsZero() && !now.Before(f.evalAt) {
 		best, done := c.betterExit(now)
 		if done {
 			f.evalAt = time.Time{}
 		}
 		if best != nil {
-			reason := fmt.Sprintf("%s is faster: %.0f ms against %.0f ms on %s", best.addr.Addr(), best.rtt, f.activeRTT, f.servers[f.active].Addr())
+			reason := fmt.Sprintf("%s has a better exit score (%.0f Mbps cap, %.0f ms RTT, %d hops) than %s (%.0f Mbps cap, %.0f ms RTT, %d hops)",
+				best.addr.Addr(), best.capacityMbps, best.rtt, best.hopCount, f.servers[f.active].Addr(), activeInfo.capacityMbps, f.activeRTT, activeInfo.hopCount)
 			return c.promote(best, now, reason, false)
 		}
 	}
@@ -572,6 +646,24 @@ func (c *Client) betterExit(now time.Time) (best *candidate, done bool) {
 		if cand.rtt <= 0 {
 			return nil, false // still being measured
 		}
+		activeCapacity := 0.0
+		if f.active >= 0 && f.active < len(f.servers) {
+			if activeInfo := f.info[f.servers[f.active]]; activeInfo != nil {
+				activeCapacity = activeInfo.capacityMbps
+			}
+		}
+		if cand.capacityMbps > 0 && activeCapacity > 0 {
+			activeHops := 0
+			if f.active >= 0 && f.active < len(f.servers) {
+				if activeInfo := f.info[f.servers[f.active]]; activeInfo != nil {
+					activeHops = activeInfo.hopCount
+				}
+			}
+			if exitPreferenceScore(cand.capacityMbps, cand.rtt, cand.hopCount) >= exitPreferenceScore(activeCapacity, f.activeRTT, activeHops)*1.15 && faster(cand, best) {
+				best = cand
+			}
+			continue
+		}
 		if f.activeRTT-cand.rtt >= margin && faster(cand, best) {
 			best = cand
 		}
@@ -601,39 +693,164 @@ func (c *Client) newCandidate(addr netip.AddrPort, now time.Time) (*candidate, e
 	if err != nil {
 		return nil, err
 	}
-	return &candidate{addr: addr, st: bs, started: now}, nil
+	capacity := 0.0
+	hops := 0
+	if info := c.fo.info[addr]; info != nil {
+		capacity = info.capacityMbps
+		hops = info.hopCount
+	}
+	return &candidate{addr: addr, st: bs, started: now, capacityMbps: capacity, hopCount: hops}, nil
+}
+
+func (c *Client) eligibleFlowExits(now time.Time) []flowExit {
+	f := &c.fo
+	if f.active < 0 || f.active >= len(f.servers) {
+		return nil
+	}
+	exits := c.flowExits[:0]
+	active := f.servers[f.active]
+	if info := f.info[active]; info != nil {
+		ready := c.recv != nil && c.recv.ReadyPaths(now) > 0 && info.health.state != "open"
+		retain := info.health.state != "open" && info.state != "unreachable"
+		if ready || retain {
+			exits = append(exits, flowExit{addr: active, capacity: info.capacityMbps, rtt: f.activeRTT, hops: info.hopCount, ready: ready, retain: retain})
+		}
+	}
+	if f.standby == nil {
+		c.flowExits = exits
+		return exits
+	}
+	for _, cand := range f.standby.cands {
+		info := f.info[cand.addr]
+		if info == nil || cand.st == nil {
+			continue
+		}
+		ready := cand.ready && cand.st.recv.ReadyPaths(now) > 0 && info.health.state != "open" && info.state != "unreachable"
+		retain := info.health.state != "open" && info.state != "unreachable"
+		if ready || retain {
+			exits = append(exits, flowExit{addr: cand.addr, capacity: cand.capacityMbps, rtt: cand.rtt, hops: cand.hopCount, ready: ready, retain: retain})
+		}
+	}
+	c.flowExits = exits
+	return exits
+}
+
+func (c *Client) enqueueFlowPacket(p bond.QueuedPacket, now time.Time, activeNextBulk *time.Time) {
+	active := c.fo.servers[c.fo.active]
+	target := active
+	if c.cfg.ExitFlowBalance && c.flows != nil {
+		if info, ok := packetFlowInfo(p.Payload); ok {
+			target = c.flows.route(info, len(p.Payload), c.eligibleFlowExits(now), active, now)
+		}
+	}
+	if target != active && c.fo.standby != nil {
+		for _, cand := range c.fo.standby.cands {
+			if cand.addr != target || cand.st == nil {
+				continue
+			}
+			if !cand.st.queue.Enqueue(p) {
+				c.mu.Lock()
+				c.snapshot.Rejected++
+				c.mu.Unlock()
+				return
+			}
+			if p.Priority || p.Replicate || bond.IsTCPControl(p.Payload) {
+				cand.nextBulk = now
+			}
+			return
+		}
+	}
+	if c.queue.Enqueue(p) && (p.Priority || p.Replicate || bond.IsTCPControl(p.Payload)) {
+		*activeNextBulk = now
+	}
+}
+
+func (c *Client) maintainFlowExitQueues(now time.Time) error {
+	if c.fo.standby == nil {
+		return nil
+	}
+	for _, cand := range c.fo.standby.cands {
+		if cand.st == nil {
+			continue
+		}
+		if err := cand.st.sender.Maintenance(now, c.writeStandby); err != nil {
+			return err
+		}
+		if cand.st.queue.Stats().QueuedPackets == 0 || now.Before(cand.nextBulk) {
+			continue
+		}
+		next, err := cand.st.queue.Pump(now, c.writeStandby)
+		if err != nil {
+			return err
+		}
+		cand.nextBulk = next
+	}
+	return nil
 }
 
 // standbyInbound feeds a datagram from a standby server to its probe receiver. It reports whether
 // the datagram belonged to one.
-func (c *Client) standbyInbound(d inbound, now time.Time) bool {
+func (c *Client) standbyInbound(d inbound, now time.Time, deliverQ chan<- []byte) (bool, error) {
 	st := c.fo.standby
 	if st == nil || d.rx != nil {
-		return false
+		return false, nil
 	}
 	for _, cand := range st.cands {
 		if cand.addr != d.endpoint {
 			continue
 		}
-		res, err := cand.st.recv.ReceiveVia(d.local, d.frame, d.endpoint, now, true)
-		if err == nil {
-			if res.Authenticated {
-				cand.lastAuth = now
+		var res bond.ReceiveResult
+		var err error
+		if d.hasECN {
+			res, err = cand.st.recv.ReceiveViaECN(d.local, d.frame, d.endpoint, now, true, d.outerECN)
+		} else {
+			res, err = cand.st.recv.ReceiveVia(d.local, d.frame, d.endpoint, now, true)
+		}
+		if err != nil {
+			return true, nil // a malformed/unauthenticated standby datagram must not stop the active tunnel
+		}
+		if res.Authenticated {
+			cand.lastAuth = now
+		}
+		if c.cfg.ExitFlowBalance {
+			cand.st.sender.Controls(res, now, c.writeStandby)
+			for _, p := range res.Deliver {
+				if flow, ok := packetFlowInfo(p); ok {
+					c.flows.observeInbound(flow, cand.addr, len(p), now)
+				}
+				select {
+				case deliverQ <- p:
+				default:
+					c.mu.Lock()
+					c.loop.DeliverDropped++
+					c.mu.Unlock()
+				}
 			}
+		} else {
 			for _, o := range res.Send {
 				c.writeStandby(o)
 			}
 		}
-		return true
+		return true, nil
 	}
-	return false
+	return false, nil
 }
 
-func (c *Client) writeStandby(d bond.Datagram) {
-	if d.Local < 0 || d.Local >= len(c.conns) || c.socks[d.Local] != nil {
-		return
+func (c *Client) writeStandby(d bond.Datagram) error {
+	if d.Local < 0 || d.Local >= len(c.conns) {
+		return fmt.Errorf("client: invalid standby uplink %d", d.Local)
 	}
-	_, _ = c.conns[d.Local].WriteToUDPAddrPort(d.Frame, d.Endpoint)
+	if s := c.socks[d.Local]; s != nil {
+		return fmt.Errorf("client: standby exits cannot use carrier uplink %d", d.Local)
+	}
+	if d.Local < len(c.ecnConns) && c.ecnConns[d.Local] {
+		return writeUDPWithECN(c.conns[d.Local], d.Frame, d.Endpoint, d.TrafficClass)
+	}
+	if dscp := d.TrafficClass & 0xfc; dscp != 0 {
+		return writeUDPWithDSCP(c.conns[d.Local], d.Frame, d.Endpoint, dscp)
+	}
+	_, err := c.conns[d.Local].WriteToUDPAddrPort(d.Frame, d.Endpoint)
+	return err
 }
 
 // standbyTick keeps the warm candidates handshaking and their reported state current.
@@ -642,8 +859,12 @@ func (c *Client) standbyTick(now time.Time) {
 	for _, cand := range f.standby.cands {
 		res, err := cand.st.recv.Tick(now)
 		if err == nil {
-			for _, o := range res.Send {
-				c.writeStandby(o)
+			if c.cfg.ExitFlowBalance {
+				cand.st.sender.Controls(res, now, c.writeStandby)
+			} else {
+				for _, o := range res.Send {
+					c.writeStandby(o)
+				}
 			}
 		}
 		info := f.info[cand.addr]
@@ -684,10 +905,13 @@ func (c *Client) promote(cand *candidate, now time.Time, reason string, failed b
 	f := &c.fo
 	from := f.servers[f.active]
 	old := c.receiver()
-	// Carry packet numbering, cached repairs, and held receive packets into
-	// the warmed stack before promotion. Its handshake and path state stay local.
-	if err := copyRecoveryState(c.sender, old, cand.st.sender, cand.st.recv); err != nil {
-		return fmt.Errorf("transfer packet recovery state to %s: %w", cand.addr, err)
+	// Legacy single-exit failover transfers recovery state. In flow-balance mode,
+	// every exit has an independent sequence space and active NAT sessions, so
+	// copying state would corrupt flows already pinned to the target exit.
+	if !c.cfg.ExitFlowBalance {
+		if err := copyRecoveryState(c.sender, old, cand.st.sender, cand.st.recv); err != nil {
+			return fmt.Errorf("transfer packet recovery state to %s: %w", cand.addr, err)
+		}
 	}
 	old.NoteComponent("exit-node", !failed, reason)
 	dir := c.outageDirNow()
@@ -695,6 +919,9 @@ func (c *Client) promote(cand *candidate, now time.Time, reason string, failed b
 		old.CloseOutageLog()
 	}
 	c.adopt(cand.st)
+	if c.cfg.OnProvisioning != nil {
+		c.cfg.OnProvisioning(c.recv.GatewayProvisioning())
+	}
 	if dir != "" {
 		_ = cand.st.recv.OpenOutageLog(dir)
 	}
@@ -775,15 +1002,38 @@ func (c *Client) exitStatus() ExitStatus {
 	}
 	f.lastTX, f.lastRX = tx, rx
 	st := ExitStatus{Active: f.servers[f.active], Primary: f.servers[0], Switches: f.switches, LastSwitch: f.lastSwitch,
-		LastReason: f.lastReason, SilentMS: float64(f.silent) / float64(time.Millisecond), Probing: f.searching}
+		LastReason: f.lastReason, SilentMS: float64(f.silent) / float64(time.Millisecond), Probing: f.searching, FlowBalance: c.cfg.ExitFlowBalance}
 	for i, s := range f.servers {
 		info := f.info[s]
+		var provisioning *bond.GatewayProvisioning
+		if i == f.active {
+			if c.recv != nil {
+				provisioning = c.recv.GatewayProvisioning()
+			}
+		} else if f.standby != nil {
+			for _, candidate := range f.standby.cands {
+				if candidate.addr == s && candidate.st != nil && candidate.st.recv != nil {
+					provisioning = candidate.st.recv.GatewayProvisioning()
+					break
+				}
+			}
+		}
 		errorRate := 0.0
 		if info.health.filled > 0 {
 			errorRate = float64(info.health.failures) / float64(info.health.filled)
 		}
-		e := ExitServer{Addr: s, Active: i == f.active, State: info.state, HandshakeMS: info.handshakeMS, CheckedAt: info.checked, Failures: info.failures, RTTMS: info.rtt,
+		e := ExitServer{Addr: s, Active: i == f.active, Provisioning: provisioning, State: info.state, HandshakeMS: info.handshakeMS, CheckedAt: info.checked, Failures: info.failures, RTTMS: info.rtt, CapacityMbps: info.capacityMbps, HopCount: info.hopCount,
 			HealthBreaker: info.health.state, HealthSamples: info.health.filled, HealthErrorRate: errorRate, HealthTimeoutMS: float64(adaptiveTimeout(info.rtt, f.after)) / float64(time.Millisecond)}
+		if c.flows != nil {
+			flowStats := c.flows.stats(s)
+			e.FlowSessions = flowStats.Sessions
+			e.FlowTXPackets, e.FlowTXBytes = flowStats.TXPackets, flowStats.TXBytes
+			e.FlowRXPackets, e.FlowRXBytes, e.FlowMbpsOffered = flowStats.RXPackets, flowStats.RXBytes, flowStats.MbpsOffered
+			e.FlowReassignments, e.FlowUntracked = flowStats.Reassignments, flowStats.Untracked
+			st.TrackedFlows += flowStats.Sessions
+			st.UntrackedFlows += flowStats.Untracked
+		}
+		e.EffectiveMbps = exitPreferenceScore(e.CapacityMbps, e.RTTMS, e.HopCount)
 		if e.Active {
 			e.State = "active"
 		}

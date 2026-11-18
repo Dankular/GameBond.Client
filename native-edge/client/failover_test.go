@@ -107,9 +107,19 @@ func TestFailoverMovesToStandbyWhenActiveServerDies(t *testing.T) {
 	}
 	waitReady(t, c, 2, 8*time.Second)
 	sendN(t, c, 1000, 300, &gotB, 10*time.Second)
-	ex := c.Snapshot().Exit
-	if ex.Active != b || ex.Switches != 1 || ex.Servers[0].Failures != 1 || ex.Servers[0].State != "unreachable" {
-		t.Fatalf("exit status after failover: %+v", ex)
+	// The status snapshot is republished by the client loop at most every 100 ms, so it can trail the
+	// traffic that has already moved; wait for it rather than reading it once.
+	var ex ExitStatus
+	settled := time.Now().Add(5 * time.Second)
+	for {
+		ex = c.Snapshot().Exit
+		if ex.Active == b && ex.Switches == 1 && ex.Servers[0].Failures == 1 && ex.Servers[0].State == "unreachable" {
+			break
+		}
+		if time.Now().After(settled) {
+			t.Fatalf("exit status after failover: %+v", ex)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	if ex.Servers[0].WireTX == 0 || ex.Servers[1].WireTX == 0 || ex.Servers[1].WireRX == 0 {
 		t.Fatalf("each exit should keep the traffic it carried: %+v", ex.Servers)

@@ -280,3 +280,19 @@ func TestOversizeIPv4IsFragmentedOrAnsweredWithPMTU(t *testing.T) {
 		})
 	}
 }
+
+func TestLocalHandlerConsumesFrameAndReplies(t *testing.T) {
+	b, adapter, queued := newTestL2Bridge(t, L2BridgeConfig{Name: "t"})
+	frame := l2frame(1, 2, 0x0800, 50)
+	b.SetLocalHandler(func(f []byte) ([]byte, bool) { return l2frame(2, 1, 0x0800, 50), true })
+	b.FromAdapter(frame)
+	if len(*queued) != 0 || b.Stats()["local_handled"].(uint64) != 1 {
+		t.Fatalf("a consumed frame must not reach the bond: queued=%d", len(*queued))
+	}
+	_ = adapter
+	b.SetLocalHandler(func(f []byte) ([]byte, bool) { return nil, false })
+	b.FromAdapter(frame)
+	if len(*queued) != 1 {
+		t.Fatalf("an unhandled frame must be bridged: queued=%d", len(*queued))
+	}
+}

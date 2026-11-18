@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Dankular/GameBond.Core/bond"
 	"gamebond.local/nativeedge/uplink"
+	"github.com/Dankular/GameBond.Core/bond"
 )
 
 // loopbackServer is a minimal Go GB03 server: one socket, Receiver ticks.
@@ -66,6 +66,39 @@ func loopbackServer(t *testing.T, ctx context.Context, key, session []byte, got 
 		}
 	}()
 	return conn.LocalAddr().(*net.UDPAddr).AddrPort()
+}
+
+func TestECNSocketCopiesIPv4OuterCodepoint(t *testing.T) {
+	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := enableECNReceive(listener); err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := uplink.Open(uplink.Spec{Addr: netip.MustParseAddr("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Close()
+	if err := enableECNReceive(tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeUDPWithECN(tx, []byte("ecn"), listener.LocalAddr().(*net.UDPAddr).AddrPort(), 2); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 32)
+	_, _, ecn, hasECN, err := readUDPWithECN(listener, buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasECN || ecn != 2 {
+		t.Fatalf("received outer ECN=%d present=%v, want ECT(0) (ECN=2)", ecn, hasECN)
+	}
 }
 
 func TestClientRunLoopDeliversOverTwoPinnedUplinks(t *testing.T) {

@@ -249,25 +249,42 @@ func (s *DHCPServer) Handle(frame []byte) (reply []byte, handled bool) {
 		return nil, false
 	}
 	request := udp[8:udpLen]
+	var srcMAC [6]byte
+	copy(srcMAC[:], frame[6:12])
+	source := netip.AddrFrom4(src)
+	if netip.AddrFrom4(dst) != netip.AddrFrom4([4]byte{255, 255, 255, 255}) && netip.AddrFrom4(dst) != s.serverID() {
+		s.stats.Malformed++
+		return nil, true
+	}
+	body, handled := s.handleMessage(srcMAC, source, request)
+	if body == nil {
+		return nil, handled
+	}
+	return s.frameFor(body, request), true
+}
+
+// HandleMessage processes one DHCP client message (the UDP payload) that arrived from the Ethernet
+// source srcMAC and IPv4 source source. It returns the DHCP reply payload, or nil. handled is false
+// only when the payload is not a DHCP request at all. The caller owns delivery: the reply is meant
+// for 255.255.255.255:68.
+func (s *DHCPServer) HandleMessage(srcMAC [6]byte, source netip.Addr, request []byte) (reply []byte, handled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.handleMessage(srcMAC, source, request)
+}
+
+func (s *DHCPServer) handleMessage(srcMAC [6]byte, source netip.Addr, request []byte) ([]byte, bool) {
 	if len(request) < 240 || request[0] != 1 || request[1] != 1 || request[2] != 6 || !bytes.Equal(request[236:240], []byte{0x63, 0x82, 0x53, 0x63}) {
 		s.stats.Malformed++
 		return nil, true
 	}
 	var chaddr [6]byte
 	copy(chaddr[:], request[28:34])
-	var srcMAC [6]byte
-	copy(srcMAC[:], frame[6:12])
 	if chaddr != srcMAC || chaddr == ([6]byte{}) || chaddr[0]&1 != 0 {
 		s.stats.Malformed++
 		return nil, true
 	}
-	source := netip.AddrFrom4(src)
-	broadcast := netip.AddrFrom4([4]byte{255, 255, 255, 255})
 	if source != netip.AddrFrom4([4]byte{}) && !s.network.Prefix.Contains(source) {
-		s.stats.Malformed++
-		return nil, true
-	}
-	if netip.AddrFrom4(dst) != broadcast && netip.AddrFrom4(dst) != s.network.Prefix.Addr() {
 		s.stats.Malformed++
 		return nil, true
 	}
@@ -297,9 +314,9 @@ func (s *DHCPServer) Handle(frame []byte) (reply []byte, handled bool) {
 		}
 		s.offers[chaddr] = dhcpOffer{ip: address, xid: xid, expires: now.Add(60 * time.Second)}
 		s.stats.Offers++
-		return s.replyFrame(request, chaddr, 2, address), true
+		return s.replyBody(request, chaddr, 2, address), true
 	case 3: // REQUEST
-		if serverID := options[54]; len(serverID) == 4 && !bytes.Equal(serverID, s.network.Prefix.Addr().AsSlice()) {
+		if serverID := options[54]; len(serverID) == 4 && !bytes.Equal(serverID, s.serverID().AsSlice()) {
 			return nil, true // the client selected a different DHCP server
 		}
 		requested := netip.Addr{}
@@ -315,7 +332,7 @@ func (s *DHCPServer) Handle(frame []byte) (reply []byte, handled bool) {
 		address, ok := s.allocate(chaddr, requested, now)
 		if !ok || !requested.IsValid() || address != requested {
 			s.stats.Naks++
-			return s.replyFrame(request, chaddr, 6, netip.Addr{}), true
+			return s.replyBody(request, chaddr, 6, netip.Addr{}), true
 		}
 		lease := PoolLease{Network: s.network.Name, IP: address, MAC: chaddr, Hostname: dhcpHostnameFromOptions(options), Granted: now, Expires: now.Add(time.Duration(s.network.DHCP.LeaseSeconds) * time.Second)}
 		if s.leases != nil {
@@ -323,7 +340,7 @@ func (s *DHCPServer) Handle(frame []byte) (reply []byte, handled bool) {
 		}
 		delete(s.offers, chaddr)
 		s.stats.Acks++
-		return s.replyFrame(request, chaddr, 5, address), true
+		return s.replyBody(request, chaddr, 5, address), true
 	case 7: // RELEASE
 		if s.leases != nil {
 			if lease, ok := s.leases.GetByMACAt(s.network.Name, chaddr, now); ok && bytes.Equal(request[12:16], lease.IP.AsSlice()) {
@@ -441,7 +458,7 @@ func parseDHCPOptions(data []byte) (map[byte][]byte, bool) {
 	return out, ended
 }
 
-func (s *DHCPServer) replyFrame(request []byte, chaddr [6]byte, message byte, yiaddr netip.Addr) []byte {
+func (s *DHCPServer) replyBody(request []byte, chaddr [6]byte, message byte, yiaddr netip.Addr) []byte {
 	body := make([]byte, 240)
 	body[0], body[1], body[2] = 2, 1, 6
 	copy(body[4:8], request[4:8])
@@ -451,7 +468,8 @@ func (s *DHCPServer) replyFrame(request []byte, chaddr [6]byte, message byte, yi
 		a := yiaddr.As4()
 		copy(body[16:20], a[:])
 	}
-	server := s.network.Prefix.Addr().As4()
+	server := s.serverID().As4()
+	router := s.network.Prefix.Addr().As4()
 	copy(body[20:24], server[:])
 	copy(body[28:34], chaddr[:])
 	copy(body[236:240], []byte{0x63, 0x82, 0x53, 0x63})
@@ -461,22 +479,51 @@ func (s *DHCPServer) replyFrame(request []byte, chaddr [6]byte, message byte, yi
 		lease := uint32(s.network.DHCP.LeaseSeconds)
 		options = append(options, 51, 4)
 		options = binary.BigEndian.AppendUint32(options, lease)
+		options = append(options, 58, 4)
+		options = binary.BigEndian.AppendUint32(options, lease/2)
+		options = append(options, 59, 4)
+		options = binary.BigEndian.AppendUint32(options, lease/8*7)
+		if mtu := s.network.MTU; mtu >= 576 && mtu <= 9000 {
+			options = append(options, 26, 2, byte(mtu>>8), byte(mtu))
+		}
+		if p := s.network.Prefix; p.Bits() < 31 {
+			bcast := p.Masked().Addr().As4()
+			for i := p.Bits(); i < 32; i++ {
+				bcast[i/8] |= 1 << (7 - uint(i%8))
+			}
+			options = append(options, 28, 4)
+			options = append(options, bcast[:]...)
+		}
 		options = append(options, 1, 4)
 		mask := prefixMask(s.network.Prefix.Bits())
 		options = append(options, mask[:]...)
 		options = append(options, 3, 4)
-		options = append(options, server[:]...)
+		options = append(options, router[:]...)
 		dns := make([]byte, 0, 4*len(s.network.DHCP.DNS))
 		for _, address := range s.network.DHCP.DNS {
 			a := address.As4()
 			dns = append(dns, a[:]...)
 		}
-		options = append(options, 6, byte(len(dns)))
-		options = append(options, dns...)
+		if len(dns) > 0 {
+			options = append(options, 6, byte(len(dns)))
+			options = append(options, dns...)
+		}
 	}
 	options = append(options, 255)
 	body = append(body, options...)
-	serverIP := s.network.Prefix.Addr().As4()
+	return body
+}
+
+// serverID is the address the server answers from: ServerID when set, else the gateway.
+func (s *DHCPServer) serverID() netip.Addr {
+	if s.network.ServerID.IsValid() {
+		return s.network.ServerID
+	}
+	return s.network.Prefix.Addr()
+}
+
+func (s *DHCPServer) frameFor(body, request []byte) []byte {
+	serverIP := s.serverID().As4()
 	broadcast := [4]byte{255, 255, 255, 255}
 	udp := buildUDP(serverIP, broadcast, 67, 68, body)
 	ip := buildIPv4(serverIP, broadcast, 17, udp, uint16(binary.BigEndian.Uint32(request[4:8])))

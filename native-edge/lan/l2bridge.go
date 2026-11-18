@@ -43,6 +43,22 @@ type L2Bridge struct {
 	queueFull, switchDrops, writeErr atomic.Uint64
 	trace                            l2Trace
 	read                             atomic.Uint64
+	local                            atomic.Pointer[LocalHandler]
+	localHandled                     atomic.Uint64
+}
+
+// LocalHandler answers a frame the device sent without forwarding it to the bond. It returns the
+// reply frame (nil for none) and whether it consumed the frame.
+type LocalHandler func(frame []byte) (reply []byte, handled bool)
+
+// SetLocalHandler installs (or, with nil, removes) a handler that sees every frame from the
+// adapter before the switch does. A consumed frame is never forwarded.
+func (b *L2Bridge) SetLocalHandler(h LocalHandler) {
+	if h == nil {
+		b.local.Store(nil)
+		return
+	}
+	b.local.Store(&h)
 }
 
 // NewL2Bridge builds the bridge. submit queues a payload for the bond; classifier gives frames
@@ -82,8 +98,28 @@ func (b *L2Bridge) Run(ctx context.Context) error {
 	return nil
 }
 
+// ToAdapter writes a locally generated frame (a reply from the client's own gVisor stack) to the
+// adapter, so the device sees it as if it came from the bond network.
+func (b *L2Bridge) ToAdapter(frame []byte) {
+	if err := b.io.Write(padWire(frame)); err != nil {
+		b.writeErr.Add(1)
+	}
+}
+
 // FromAdapter handles one frame the device sent.
 func (b *L2Bridge) FromAdapter(frame []byte) {
+	if h := b.local.Load(); h != nil {
+		if reply, handled := (*h)(frame); handled {
+			b.localHandled.Add(1)
+			b.trace.note("local", frame)
+			if len(reply) > 0 {
+				if err := b.io.Write(padWire(reply)); err != nil {
+					b.writeErr.Add(1)
+				}
+			}
+			return
+		}
+	}
 	now := b.now()
 	frameMTU := b.tunnelFrameMTU(frame)
 	if len(frame) > frameMTU {
@@ -243,7 +279,7 @@ func (b *L2Bridge) Stats() map[string]any {
 	st := b.sw.Stats()
 	m := map[string]any{
 		"name": b.cfg.Name, "to_tunnel": b.toTunnel.Load(), "from_tunnel": b.fromTunnel.Load(),
-		"oversize": b.oversize.Load(), "queue_full": b.queueFull.Load(), "switch_drops": b.switchDrops.Load(), "write_errors": b.writeErr.Load(),
+		"oversize": b.oversize.Load(), "queue_full": b.queueFull.Load(), "switch_drops": b.switchDrops.Load(), "write_errors": b.writeErr.Load(), "local_handled": b.localHandled.Load(),
 		"fdb_size": st.FDBSize, "learned": st.Learned, "moves": st.Moves, "aged": st.Aged, "flooded": st.Flooded, "forwarded": st.Forwarded,
 		"drop_storm": st.DropStorm, "drop_mac_limit": st.DropMACLimit, "drop_blocked": st.DropBlocked, "drop_isolated": st.DropIsolated,
 		"drop_other": st.DropOther, "drop_bpdu_guard": st.DropBPDUGuard, "drop_vlan": st.DropVLAN, "drop_ra_guard": st.DropRAGuard,

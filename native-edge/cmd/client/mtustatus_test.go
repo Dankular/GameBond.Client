@@ -11,9 +11,9 @@ func TestMTUStatusShape(t *testing.T) {
 	if mtuStatus(bond.PathSnapshot{}, nil) != nil {
 		t.Fatal("no discovery must report null")
 	}
-	p := bond.PathSnapshot{Local: 1, MTUSkips: 3, MTU: &bond.MTUStats{PathMTU: 1400, Ceiling: 1500, Confirmed: 1300, Capable: true, Rounds: 4, Acks: 2, FailedSizes: []int{1450, 1410}}}
+	p := bond.PathSnapshot{Local: 1, MTUSkips: 3, MTU: &bond.MTUStats{PathMTU: 1400, Ceiling: 1500, Confirmed: 1300, Capable: true, State: bond.DPLPMTUDSearching, ProbeCount: 1, ProbeSize: 1450, Rounds: 4, Acks: 2, FailedSizes: []int{1450, 1410}}}
 	got := mtuStatus(p, []bool{false, true}).(map[string]any)
-	want := map[string]any{"path_mtu": 1400, "ceiling": 1500, "confirmed": 1300, "capable": true, "rounds": 4, "acks": 2,
+	want := map[string]any{"path_mtu": 1400, "ceiling": 1500, "confirmed": 1300, "capable": true, "state": bond.DPLPMTUDSearching, "probe_count": 1, "probe_size": 1450, "rounds": 4, "acks": 2,
 		"failed_sizes": []int{1410, 1450}, "skips": uint64(3), "df_enforced": true}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("%v", got)

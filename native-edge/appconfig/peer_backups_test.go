@@ -31,3 +31,47 @@ func TestPeerBackupsValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestPeerCapacityHintsMatchConfiguredExits(t *testing.T) {
+	const head = `{"role":"client","bind":[["192.168.1.93",0]],"interface_indices":[22],"peer":["203.0.113.7",4433],"peer_backups":[["198.51.100.9",4433]],"session":"00112233445566778899aabbccddeeff","client_tunnel_ip":"10.77.0.2","redundant_mode":false,"bonding_mode":true`
+	cases := []struct {
+		name, extra string
+		ok          bool
+	}{
+		{"primary and backup capacities", `,"peer_capacity_mbps":1000,"peer_backup_capacity_mbps":[100]`, true},
+		{"capacity count mismatch", `,"peer_capacity_mbps":1000,"peer_backup_capacity_mbps":[]`, false},
+		{"negative primary capacity", `,"peer_capacity_mbps":-1`, false},
+		{"non-finite backup capacity", `,"peer_backup_capacity_mbps":[1e999]`, false},
+		{"invalid capacity type", `,"peer_backup_capacity_mbps":["100"]`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := Load([]byte(head+c.extra+`}`), Options{Windows: true})
+			if (err == nil) != c.ok {
+				t.Fatalf("ok=%v, err=%v", c.ok, err)
+			}
+		})
+	}
+}
+
+func TestPeerHopCountsMatchConfiguredExits(t *testing.T) {
+	const head = `{"role":"client","bind":[["192.168.1.93",0]],"interface_indices":[22],"peer":["203.0.113.7",4433],"peer_backups":[["198.51.100.9",4433]],"session":"00112233445566778899aabbccddeeff","client_tunnel_ip":"10.77.0.2","redundant_mode":false,"bonding_mode":true`
+	cases := []struct {
+		name, extra string
+		ok          bool
+	}{
+		{"valid route lengths", `,"peer_hop_count":11,"peer_backup_hop_counts":[13]`, true},
+		{"backup count mismatch", `,"peer_backup_hop_counts":[]`, false},
+		{"negative count", `,"peer_hop_count":-1`, false},
+		{"too many hops", `,"peer_backup_hop_counts":[65]`, false},
+		{"fractional count", `,"peer_hop_count":11.5`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := Load([]byte(head+c.extra+`}`), Options{Windows: true})
+			if (err == nil) != c.ok {
+				t.Fatalf("ok=%v, err=%v", c.ok, err)
+			}
+		})
+	}
+}

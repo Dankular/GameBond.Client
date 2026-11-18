@@ -11,6 +11,7 @@ import (
 	"gamebond.local/nativeedge/hrclock"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,6 +39,9 @@ type Config struct {
 	// StripeAbove is the sustained Mbit/s above which a bulk flow is striped, not duplicated.
 	StripeAbove float64
 	CoDel       bool // per-flow CoDel with ECN marking on the bulk queue
+	// ECN enables RFC 6040 outer-header ECN on raw UDP uplinks. Support is
+	// advertised in the existing version exchange; legacy exits receive no ECT.
+	ECN bool
 	// ParityRowsMin and ParityRowsMax bound the adaptive Reed-Solomon parity rows per group
 	// of 8 packets (1 row = 12.5%, 3 rows = 37.5%); zero means 1 and 3.
 	ParityRowsMin, ParityRowsMax int
@@ -64,13 +68,28 @@ type Config struct {
 	// Backups are standby exit servers tried, in order, when Server stops answering (see failover.go).
 	// They cannot be combined with Outer.
 	Backups []netip.AddrPort
+	// ExitCapacityMbps is the configured maximum egress capacity of Server; zero means unknown.
+	ExitCapacityMbps float64
+	// BackupCapacitiesMbps aligns with Backups; zero entries mean unknown.
+	BackupCapacitiesMbps []float64
+	// ExitHopCount is the measured route length to Server; zero means unknown.
+	ExitHopCount int
+	// BackupHopCounts aligns with Backups; zero entries mean unknown.
+	BackupHopCounts []int
+	// ExitFlowBalance pins each IP flow to one healthy exit. The exits must accept
+	// the same client session and tunnel address; ordinary failover remains the fallback.
+	ExitFlowBalance bool
 	// FailoverAfter is how long the active server may be silent before the slow failover path may move to a standby; 0 means 1 s. The fast path adapts below it.
 	FailoverAfter time.Duration
-	// AutoBestExit moves to a faster standby exit, and picks the fastest one when failing over. A planned
-	// move resets bonded TCP streams like a failover, so it needs a sustained lead (see betterFor).
+	// AutoBestExit moves to a better standby exit, using configured capacity and measured RTT when both
+	// are known, and picks the best available one when failing over.
 	AutoBestExit bool
 	// OnSwitch is called on the loop goroutine after the active server changed.
 	OnSwitch func(from, to netip.AddrPort, reason string)
+	// OnProvisioning is called on the loop goroutine when the active exit's
+	// authenticated topology assignment changes. Hand values to a nonblocking
+	// owner when applying the client gVisor link can take time.
+	OnProvisioning func(*bond.GatewayProvisioning)
 }
 
 type inbound struct {
@@ -78,34 +97,41 @@ type inbound struct {
 	frame    []byte
 	endpoint netip.AddrPort
 	rx       *carrier.Received // set when the datagram came through a carrier socket
+	outerECN byte
+	hasECN   bool
 }
 
 type Client struct {
-	cfg       Config
-	recv      *bond.Receiver
-	sender    *bond.Sender
-	queue     *bond.TransmitQueue
-	qos       *bond.AdaptiveQoS
-	conns     []*net.UDPConn
-	socks     []*carrier.Socket // nil entry: plain UDP
-	lastRec   []time.Time
-	loop      LoopStats
-	incoming  chan inbound
-	submit    chan bond.QueuedPacket
-	policies  chan []bond.PathPolicy
-	hints     chan pathHintMsg
-	once      sync.Once
-	mu        sync.Mutex
-	snapshot  Snapshot
-	specs     []uplink.Spec
-	avail     []bool
-	rebind    chan rebindRequest
-	runCtx    context.Context
-	done      chan struct{}
-	rebinds   uint64
-	serverPtr atomic.Pointer[netip.AddrPort]
-	fo        failoverState
-	outageDir string // guarded by mu
+	cfg              Config
+	recv             *bond.Receiver
+	sender           *bond.Sender
+	queue            *bond.TransmitQueue
+	qos              *bond.AdaptiveQoS
+	conns            []*net.UDPConn
+	ecnConns         []bool
+	socks            []*carrier.Socket // nil entry: plain UDP
+	lastRec          []time.Time
+	loop             LoopStats
+	incoming         chan inbound
+	submit           chan bond.QueuedPacket
+	policies         chan []bond.PathPolicy
+	hints            chan pathHintMsg
+	once             sync.Once
+	mu               sync.Mutex
+	snapshot         Snapshot
+	specs            []uplink.Spec
+	avail            []bool
+	rebind           chan rebindRequest
+	runCtx           context.Context
+	done             chan struct{}
+	rebinds          uint64
+	serverPtr        atomic.Pointer[netip.AddrPort]
+	fo               failoverState
+	flows            *flowRouteTable // loop-goroutine owned; nil unless exit flow balancing is enabled
+	flowExits        []flowExit      // scratch slice reused by the loop while selecting exits
+	flowLastExpire   time.Time
+	outageDir        string                    // guarded by mu
+	provisioningLast *bond.GatewayProvisioning // loop goroutine owned
 }
 
 // Snapshot is a copy of the loop's counters, safe to read from any goroutine.
@@ -143,6 +169,8 @@ type Snapshot struct {
 	ClientVersion, ServerVersion string
 	// ServerState is what the server announced ("updating" just before a planned restart).
 	ServerState string
+	// Provisioning is the active exit's authenticated gateway and link assignment.
+	Provisioning *bond.GatewayProvisioning
 	// Exit describes the exit servers and failovers.
 	Exit ExitStatus
 }
@@ -186,7 +214,11 @@ func New(cfg Config) (*Client, error) {
 			}
 		}
 	}
+	if cfg.ExitFlowBalance && len(cfg.Backups) == 0 {
+		return nil, fmt.Errorf("%w: exit flow balancing requires at least one backup exit", ErrConfig)
+	}
 	c := &Client{cfg: cfg, incoming: make(chan inbound, 1024), submit: make(chan bond.QueuedPacket, 4096), policies: make(chan []bond.PathPolicy, 4), hints: make(chan pathHintMsg, 16), rebind: make(chan rebindRequest), done: make(chan struct{}), specs: append([]uplink.Spec(nil), cfg.Uplinks...)}
+	c.ecnConns = make([]bool, len(cfg.Uplinks))
 	now := hrclock.Now()
 	c.initFailover(now)
 	for i, spec := range cfg.Uplinks {
@@ -210,6 +242,13 @@ func New(cfg Config) (*Client, error) {
 			}
 		}
 		c.socks = append(c.socks, sock)
+		if cfg.ECN && sock == nil {
+			if err := enableECNReceive(conn); err != nil {
+				c.closeConns()
+				return nil, fmt.Errorf("uplink %d ECN receive metadata: %w", i, err)
+			}
+			c.ecnConns[i] = true
+		}
 		c.avail = append(c.avail, live)
 		c.lastRec = append(c.lastRec, time.Time{})
 	}
@@ -300,6 +339,12 @@ func (c *Client) write(d bond.Datagram) error {
 		}
 		return err
 	}
+	if d.Local < len(c.ecnConns) && c.ecnConns[d.Local] {
+		return writeUDPWithECN(c.conns[d.Local], d.Frame, d.Endpoint, d.TrafficClass)
+	}
+	if dscp := d.TrafficClass & 0xfc; dscp != 0 {
+		return writeUDPWithDSCP(c.conns[d.Local], d.Frame, d.Endpoint, dscp)
+	}
 	_, err := c.conns[d.Local].WriteToUDPAddrPort(d.Frame, d.Endpoint)
 	return err
 }
@@ -351,6 +396,11 @@ func (c *Client) Run(ctx context.Context) error {
 	handle := func(res bond.ReceiveResult, now time.Time) {
 		c.sender.Controls(res, now, c.write)
 		for _, p := range res.Deliver {
+			if c.flows != nil {
+				if flow, ok := packetFlowInfo(p); ok {
+					c.flows.observeInbound(flow, c.fo.servers[c.fo.active], len(p), now)
+				}
+			}
 			select {
 			case deliverQ <- p:
 			default:
@@ -373,13 +423,22 @@ func (c *Client) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case d := <-c.incoming:
-			if c.standbyInbound(d, hrclock.Now()) {
+			if handled, err := c.standbyInbound(d, hrclock.Now(), deliverQ); handled {
+				if err != nil {
+					return err
+				}
 				continue
 			}
 			if len(c.fo.servers) > 1 && d.rx == nil && d.endpoint != c.serverAddr() {
 				continue // a late reply from a standby whose probe has ended
 			}
-			res, err := c.recv.ReceiveVia(d.local, d.frame, d.endpoint, hrclock.Now(), d.rx == nil || d.rx.Transport == "udp")
+			var res bond.ReceiveResult
+			var err error
+			if d.hasECN && d.rx == nil {
+				res, err = c.recv.ReceiveViaECN(d.local, d.frame, d.endpoint, hrclock.Now(), true, d.outerECN)
+			} else {
+				res, err = c.recv.ReceiveVia(d.local, d.frame, d.endpoint, hrclock.Now(), d.rx == nil || d.rx.Transport == "udp")
+			}
 			if err != nil {
 				return err
 			}
@@ -396,11 +455,7 @@ func (c *Client) Run(ctx context.Context) error {
 			}
 			handle(res, hrclock.Now())
 		case p := <-c.submit:
-			// Urgent traffic never waits for the bulk pacing timer: nextBulk is
-			// a bulk wakeup, up to 5 ms ahead after every pump.
-			if c.queue.Enqueue(p) && (p.Priority || p.Replicate || bond.IsTCPControl(p.Payload)) {
-				nextBulk = hrclock.Now()
-			}
+			c.enqueueFlowPacket(p, hrclock.Now(), &nextBulk)
 		case policies := <-c.policies:
 			if err := c.recv.SetClientLinkPolicies(policies, hrclock.Now()); err != nil {
 				return err
@@ -425,6 +480,15 @@ func (c *Client) Run(ctx context.Context) error {
 		if err = c.sender.Maintenance(now, c.write); err != nil {
 			return err
 		}
+		if c.cfg.ExitFlowBalance {
+			if err = c.maintainFlowExitQueues(now); err != nil {
+				return err
+			}
+			if c.flowLastExpire.IsZero() || now.Sub(c.flowLastExpire) >= time.Second {
+				c.flows.expire(now)
+				c.flowLastExpire = now
+			}
+		}
 		if c.queue.Stats().QueuedPackets > 0 && !now.Before(nextBulk) {
 			if nextBulk, err = c.queue.Pump(now, c.write); err != nil {
 				return err
@@ -445,6 +509,11 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 		if now.Sub(lastSnap) >= 100*time.Millisecond {
 			lastSnap = now
+			provisioning := c.recv.GatewayProvisioning()
+			provisioningChanged := !sameProvisioning(c.provisioningLast, provisioning)
+			if provisioningChanged {
+				c.provisioningLast = cloneProvisioning(provisioning)
+			}
 			c.mu.Lock()
 			c.snapshot.Ready, c.snapshot.Uplinks = c.recv.ReadyPaths(now), len(c.conns)
 			c.snapshot.Receiver, c.snapshot.Sender = c.recv.Stats(), c.sender.Stats()
@@ -452,6 +521,7 @@ func (c *Client) Run(ctx context.Context) error {
 			c.snapshot.Outages = c.recv.Outages()
 			c.snapshot.ClientVersion, c.snapshot.ServerVersion = c.recv.Versions()
 			c.snapshot.ServerState = c.recv.PeerState()
+			c.snapshot.Provisioning = cloneProvisioning(provisioning)
 			c.snapshot.Loop = c.loop
 			c.snapshot.Exit = c.exitStatus()
 			c.snapshot.Queue, c.snapshot.Paths = c.queue.Stats(), c.sender.Paths(now)
@@ -467,8 +537,29 @@ func (c *Client) Run(ctx context.Context) error {
 				}
 			}
 			c.mu.Unlock()
+			if provisioningChanged && c.cfg.OnProvisioning != nil {
+				c.cfg.OnProvisioning(cloneProvisioning(provisioning))
+			}
 		}
 	}
+}
+
+func sameProvisioning(a, b *bond.GatewayProvisioning) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Revision == b.Revision && a.TopologyID == b.TopologyID && a.SegmentID == b.SegmentID &&
+		a.ExitID == b.ExitID && a.Mode == b.Mode && a.Link == b.Link && a.GatewayAddress == b.GatewayAddress &&
+		a.DHCPAuthorityID == b.DHCPAuthorityID && slices.Equal(a.Routes, b.Routes)
+}
+
+func cloneProvisioning(p *bond.GatewayProvisioning) *bond.GatewayProvisioning {
+	if p == nil {
+		return nil
+	}
+	copy := *p
+	copy.Routes = append([]string(nil), p.Routes...)
+	return &copy
 }
 
 // carrierTick asks each carrier socket to consider falling back and, while one
@@ -543,7 +634,7 @@ func (c *Client) startReader(ctx context.Context, i int, conn *net.UDPConn, sock
 						return
 					}
 					select {
-					case c.incoming <- inbound{i, r.Packet, c.serverAddr(), &r}:
+					case c.incoming <- inbound{local: i, frame: r.Packet, endpoint: c.serverAddr(), rx: &r}:
 					case <-ctx.Done():
 						return
 					}
@@ -554,13 +645,26 @@ func (c *Client) startReader(ctx context.Context, i int, conn *net.UDPConn, sock
 	}
 	go func() {
 		buf := make([]byte, 65536)
+		if i < len(c.ecnConns) && c.ecnConns[i] {
+			for {
+				n, from, ecn, hasECN, err := readUDPWithECN(conn, buf)
+				if err != nil {
+					return
+				}
+				select {
+				case c.incoming <- inbound{local: i, frame: append([]byte(nil), buf[:n]...), endpoint: from, outerECN: ecn, hasECN: hasECN}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
 		for {
 			n, from, err := conn.ReadFromUDPAddrPort(buf)
 			if err != nil {
 				return
 			}
 			select {
-			case c.incoming <- inbound{i, append([]byte(nil), buf[:n]...), from, nil}:
+			case c.incoming <- inbound{local: i, frame: append([]byte(nil), buf[:n]...), endpoint: from}:
 			case <-ctx.Done():
 				return
 			}
@@ -628,6 +732,7 @@ func (c *Client) doRebind(req rebindRequest) rebindResult {
 		live := req.avail[i]
 		var conn *net.UDPConn
 		var sock *carrier.Socket
+		ecnEnabled := false
 		if live {
 			var err error
 			dfSpec := spec
@@ -642,6 +747,16 @@ func (c *Client) doRebind(req rebindRequest) rebindResult {
 					live = false
 				}
 			}
+			if live && c.cfg.ECN && sock == nil {
+				var err error
+				if err = enableECNReceive(conn); err != nil {
+					conn.Close()
+					res.errs = append(res.errs, RebindError{i, err.Error()})
+					live = false
+				} else {
+					ecnEnabled = true
+				}
+			}
 		}
 		if !live {
 			var err error
@@ -653,6 +768,7 @@ func (c *Client) doRebind(req rebindRequest) rebindResult {
 		}
 		oldConn, oldSock := c.conns[i], c.socks[i]
 		c.conns[i], c.socks[i], c.specs[i], c.avail[i] = conn, sock, spec, live
+		c.ecnConns[i] = ecnEnabled
 		c.lastRec[i] = time.Time{}
 		if err := c.recv.RebindClientPath(i, now, !live); err != nil {
 			res.err = err

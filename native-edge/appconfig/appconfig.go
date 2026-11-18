@@ -321,7 +321,7 @@ func Validate(config map[string]any, opt Options) (*Result, error) {
 	if f, ok := numOpt(config, "reorder_timeout_ms", 30); !ok || f < 1 || f > 200 {
 		return nil, bad("reorder_timeout_ms must be finite and between 1 and 200")
 	}
-	for _, name := range []string{"loss_tracking", "path_mtu_discovery", "failover_replay", "lab_mode"} {
+	for _, name := range []string{"loss_tracking", "path_mtu_discovery", "failover_replay", "lab_mode", "exit_flow_balance"} {
 		on, err := boolOpt(config, name, false)
 		if err != nil {
 			return nil, err
@@ -537,7 +537,74 @@ func clientChecks(config map[string]any, bindList, hosts []any, opt Options) err
 	if port, isI := isInt(peer[1]); !isI || port < 1 || port > 65535 {
 		return bad("invalid peer port")
 	}
-	return peerBackups(config, peer)
+	if err := peerBackups(config, peer); err != nil {
+		return err
+	}
+	exitFlowBalance, err := boolOpt(config, "exit_flow_balance", false)
+	if err != nil {
+		return err
+	}
+	if exitFlowBalance {
+		backups, _ := config["peer_backups"].([]any)
+		if len(backups) == 0 {
+			return bad("exit_flow_balance requires at least one peer_backups entry")
+		}
+	}
+	if err := peerCapacities(config); err != nil {
+		return err
+	}
+	return peerHopCounts(config)
+}
+
+// peerCapacities validates optional configured egress caps. Backup values are
+// positional and must stay aligned with peer_backups.
+func peerCapacities(config map[string]any) error {
+	if capacity, ok := numOpt(config, "peer_capacity_mbps", 0); !ok || capacity < 0 || capacity > 1_000_000 {
+		return bad("peer_capacity_mbps must be finite and between 0 and 1000000")
+	}
+	raw, present := config["peer_backup_capacity_mbps"]
+	if !present || raw == nil {
+		return nil
+	}
+	capacities, ok := raw.([]any)
+	backups, _ := config["peer_backups"].([]any)
+	if !ok || len(capacities) != len(backups) {
+		return bad("peer_backup_capacity_mbps must have one value per peer_backups entry")
+	}
+	for i, value := range capacities {
+		capacity, valid := number(value)
+		if !valid || capacity < 0 || capacity > 1_000_000 {
+			return bad("peer_backup_capacity_mbps[%d] must be finite and between 0 and 1000000", i)
+		}
+	}
+	return nil
+}
+
+// peerHopCounts validates optional measured route lengths. Backup values are
+// positional and must remain aligned with peer_backups.
+func peerHopCounts(config map[string]any) error {
+	if raw, present := config["peer_hop_count"]; present && raw != nil {
+		hops, ok := isInt(raw)
+		if !ok || hops < 0 || hops > 64 {
+			return bad("peer_hop_count must be an integer between 0 and 64")
+		}
+	}
+	raw, present := config["peer_backup_hop_counts"]
+	if !present || raw == nil {
+		return nil
+	}
+	hopCounts, ok := raw.([]any)
+	backups, _ := config["peer_backups"].([]any)
+	if !ok || len(hopCounts) != len(backups) {
+		return bad("peer_backup_hop_counts must have one value per peer_backups entry")
+	}
+	for i, value := range hopCounts {
+		hops, valid := isInt(value)
+		if !valid || hops < 0 || hops > 64 {
+			return bad("peer_backup_hop_counts[%d] must be an integer between 0 and 64", i)
+		}
+	}
+	return nil
 }
 
 // peerBackups checks the optional standby exit servers: at most three [host, port] pairs, each a

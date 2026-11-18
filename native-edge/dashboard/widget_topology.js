@@ -599,6 +599,15 @@ function throughputChart(history, latency, minutes, dir) {
   return s;
 }
 
+// Friendly names for the exit hosts shown in the live map. Transport state keeps
+// using the configured IP addresses; this only changes the labels people see.
+const EXIT_HOSTNAMES = Object.freeze({
+  '138.199.201.16': 'apps',
+  '195.154.119.136': 'sw01',
+  '194.164.124.139': 'ionos-exit-01'
+});
+const exitHostname = address => EXIT_HOSTNAMES[String(address || '')] || String(address || 'Unknown exit');
+
 function renderTopology() {
   if (topologyMode !== 'live') return;
   if (!current || current.state === 'unavailable' && !current.transport) { topoHead.textContent = 'Status unavailable'; return; }
@@ -635,14 +644,15 @@ function renderTopology() {
     return ['↓ ' + fmtBps(r.rxBps) + '  ↑ ' + fmtBps(r.txBps), 'total ↓ ' + bytes(x.wire_rx_bytes) + '  ↑ ' + bytes(x.wire_tx_bytes), health];
   };
   const activeX = (exit?.servers || []).find(x => x.active) || { address: exit?.active || '', wire_rx_bytes: 0, wire_tx_bytes: 0 };
-  const server = liveNodeBox('exit:active', serverX, ey, w, eh, exit && standbys.length ? (onBackup ? 'Exit server · backup' : 'Exit server · primary') : 'Exit server', exit?.active || (current?.peer ? current.peer[0] : ''), exit?.searching ? 'fair' : health === 'poor' ? 'poor' : onBackup ? 'fair' : 'good', null, false, exitLines(activeX));
+  const activeAddress = exit?.active || (current?.peer ? current.peer[0] : '');
+  const server = liveNodeBox('exit:active', serverX, ey, w, eh, exit && standbys.length ? (onBackup ? 'Exit server · backup' : 'Exit server · primary') : 'Exit server', exitHostname(activeAddress), exit?.searching ? 'fair' : health === 'poor' ? 'poor' : onBackup ? 'fair' : 'good', null, false, exitLines(activeX));
   const pc = liveNodeBox('client:local', pcX, midY, w, h, 'This PC', 'GameBond client', 'good');
   topoMap.append(server, pc);
   // Standby exits hang under the active one, dashed: they carry nothing until the active exit stops answering.
   standbys.forEach((x, i) => {
     const y = ey + (i + 1) * eg, state = x.state === 'reachable' ? 'good' : x.state === 'unreachable' ? 'poor' : 'neutral';
     const label = x.state === 'reachable' ? 'standby · ' + Math.round(x.handshake_ms) + ' ms' : x.state === 'unreachable' ? 'standby · no answer' : 'standby · not probed';
-    topoMap.append(mapLine(serverX + w / 2, (i ? y - eg + eh : ey + eh), serverX + w / 2, y, true), liveNodeBox('exit:standby:' + x.address, serverX, y, w, eh, 'Standby ' + x.address, label, state, null, false, exitLines(x)));
+    topoMap.append(mapLine(serverX + w / 2, (i ? y - eg + eh : ey + eh), serverX + w / 2, y, true), liveNodeBox('exit:standby:' + x.address, serverX, y, w, eh, 'Standby ' + exitHostname(x.address), label, state, null, false, exitLines(x)));
   });
   const linkY0 = midY + h / 2 - (paths.length - 1) * rowGap / 2 - h / 2;
   paths.forEach((p, i) => {

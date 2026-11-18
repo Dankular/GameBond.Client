@@ -30,6 +30,7 @@ import (
 	"gamebond.local/nativeedge/carrier"
 	"gamebond.local/nativeedge/client"
 	"gamebond.local/nativeedge/errhist"
+	"gamebond.local/nativeedge/gvisorlink"
 	"gamebond.local/nativeedge/hotspot"
 	"gamebond.local/nativeedge/lan"
 	"gamebond.local/nativeedge/linkpolicy"
@@ -44,44 +45,49 @@ import (
 
 // fileConfig is the subset of configs/local-client.json this daemon reads.
 type fileConfig struct {
-	Session        string                       `json:"session"`
-	Bind           [][]any                      `json:"bind"` // [[ip, port], ...] one per uplink; port is ignored (ephemeral)
-	Peer           []any                        `json:"peer"`
-	PeerBackups    [][]any                      `json:"peer_backups"`     // standby exit servers [[host, port], ...]
-	ExitFailoverMS int                          `json:"exit_failover_ms"` // silence before standbys are probed; 0 = 2000
-	ExitAutoBest   *bool                        `json:"exit_auto_best"`   // move to a clearly faster exit; default on
-	ReverseDNS     reverseDNSConfig             `json:"reverse_dns"`      // keep a DNS name pointed at the active exit node
-	MTU            int                          `json:"mtu"`
-	InitialMbps    float64                      `json:"bonding_initial_rate_mbps"`
-	MaxMbps        float64                      `json:"bonding_max_rate_mbps"`
-	FailoverReplay bool                         `json:"failover_replay"`
-	FlowPinning    bool                         `json:"flow_pinning"`
-	StripeAbove    float64                      `json:"stripe_above_mbps"`
-	CoDel          bool                         `json:"codel"`
-	Protection     string                       `json:"protection"` // ignored: every packet is always duplicated
-	ParityRowsMin  int                          `json:"parity_rows_min"`
-	ParityRowsMax  int                          `json:"parity_rows_max"`
-	LinkPolicies   map[string]linkpolicy.Policy `json:"link_policies"` // keyed by interface index, as in Python
-	GameUDPPorts   []uint16                     `json:"game_udp_ports"`
-	LossTracking   bool                         `json:"loss_tracking"`
-	LabMode        bool                         `json:"lab_mode"`
-	DelayControl   bool                         `json:"delay_control"`
-	Dish           *dishConfig                  `json:"dish"`
-	PathMTU        bool                         `json:"path_mtu_discovery"`
-	InterfaceIndex []int                        `json:"interface_indices"` // pin uplink i to this adapter index
-	InterfaceIDs   []string                     `json:"interface_ids"`     // stable adapter identities across reconnects
-	AdaptiveQoS    json.RawMessage              `json:"adaptive_qos"`
-	ClientTunnelIP string                       `json:"client_tunnel_ip"`
-	LANDevices     json.RawMessage              `json:"lan_devices"`
-	L2Bridge       json.RawMessage              `json:"l2_bridge"` // optional: bridge one adapter onto the exit network as Ethernet frames
-	Hotspot        json.RawMessage              `json:"hotspot"`
-	LocalNetworks  json.RawMessage              `json:"local_networks"`
-	StaticRoutes   json.RawMessage              `json:"static_routes"`
-	OuterTransport json.RawMessage              `json:"outer_transport"` // stream-carrier fallback; null/absent = UDP only
-	SLOProbe       bool                         `json:"slo_probe"`       // in-tunnel echo probe: measured loss and SLOs
-	SLOProbeMS     int                          `json:"slo_probe_ms"`    // probe interval, default 1000
-	SLOTarget      string                       `json:"slo_target"`      // tunnel address of the server, default 10.77.0.1
-	MetricsAddr    string                       `json:"metrics_addr"`    // loopback host:port for Prometheus, empty = off
+	Session                string                       `json:"session"`
+	Bind                   [][]any                      `json:"bind"` // [[ip, port], ...] one per uplink; port is ignored (ephemeral)
+	Peer                   []any                        `json:"peer"`
+	PeerBackups            [][]any                      `json:"peer_backups"` // standby exit servers [[host, port], ...]
+	PeerCapacityMbps       float64                      `json:"peer_capacity_mbps"`
+	PeerBackupCapacityMbps []float64                    `json:"peer_backup_capacity_mbps"`
+	PeerHopCount           int                          `json:"peer_hop_count"`
+	PeerBackupHopCounts    []int                        `json:"peer_backup_hop_counts"`
+	ExitFlowBalance        bool                         `json:"exit_flow_balance"`
+	ExitFailoverMS         int                          `json:"exit_failover_ms"` // silence before standbys are probed; 0 = 2000
+	ExitAutoBest           *bool                        `json:"exit_auto_best"`   // move to a better exit; default on
+	ReverseDNS             reverseDNSConfig             `json:"reverse_dns"`      // keep a DNS name pointed at the active exit node
+	MTU                    int                          `json:"mtu"`
+	InitialMbps            float64                      `json:"bonding_initial_rate_mbps"`
+	MaxMbps                float64                      `json:"bonding_max_rate_mbps"`
+	FailoverReplay         bool                         `json:"failover_replay"`
+	FlowPinning            bool                         `json:"flow_pinning"`
+	StripeAbove            float64                      `json:"stripe_above_mbps"`
+	CoDel                  bool                         `json:"codel"`
+	Protection             string                       `json:"protection"` // ignored: every packet is always duplicated
+	ParityRowsMin          int                          `json:"parity_rows_min"`
+	ParityRowsMax          int                          `json:"parity_rows_max"`
+	LinkPolicies           map[string]linkpolicy.Policy `json:"link_policies"` // keyed by interface index, as in Python
+	GameUDPPorts           []uint16                     `json:"game_udp_ports"`
+	LossTracking           bool                         `json:"loss_tracking"`
+	LabMode                bool                         `json:"lab_mode"`
+	DelayControl           bool                         `json:"delay_control"`
+	Dish                   *dishConfig                  `json:"dish"`
+	PathMTU                bool                         `json:"path_mtu_discovery"`
+	InterfaceIndex         []int                        `json:"interface_indices"` // pin uplink i to this adapter index
+	InterfaceIDs           []string                     `json:"interface_ids"`     // stable adapter identities across reconnects
+	AdaptiveQoS            json.RawMessage              `json:"adaptive_qos"`
+	ClientTunnelIP         string                       `json:"client_tunnel_ip"`
+	LANDevices             json.RawMessage              `json:"lan_devices"`
+	L2Bridge               json.RawMessage              `json:"l2_bridge"` // optional: bridge one adapter onto the exit network as Ethernet frames
+	Hotspot                json.RawMessage              `json:"hotspot"`
+	LocalNetworks          json.RawMessage              `json:"local_networks"`
+	StaticRoutes           json.RawMessage              `json:"static_routes"`
+	OuterTransport         json.RawMessage              `json:"outer_transport"` // stream-carrier fallback; null/absent = UDP only
+	SLOProbe               bool                         `json:"slo_probe"`       // in-tunnel echo probe: measured loss and SLOs
+	SLOProbeMS             int                          `json:"slo_probe_ms"`    // probe interval, default 1000
+	SLOTarget              string                       `json:"slo_target"`      // tunnel address of the server, default 10.77.0.1
+	MetricsAddr            string                       `json:"metrics_addr"`    // loopback host:port for Prometheus, empty = off
 }
 
 func load(path string) (fileConfig, []uplink.Spec, netip.AddrPort, error) {
@@ -188,7 +194,14 @@ func exitStatusDoc(e client.ExitStatus) map[string]any {
 	servers := make([]map[string]any, 0, len(e.Servers))
 	for _, x := range e.Servers {
 		m := map[string]any{"address": x.Addr.Addr().String(), "port": x.Addr.Port(), "active": x.Active, "state": x.State, "failures": x.Failures, "wire_tx_bytes": x.WireTX, "wire_rx_bytes": x.WireRX,
-			"health_breaker": x.HealthBreaker, "health_samples": x.HealthSamples, "health_error_rate": x.HealthErrorRate, "health_timeout_ms": x.HealthTimeoutMS}
+			"health_breaker": x.HealthBreaker, "health_samples": x.HealthSamples, "health_error_rate": x.HealthErrorRate, "health_timeout_ms": x.HealthTimeoutMS,
+			"capacity_mbps": x.CapacityMbps, "hop_count": x.HopCount, "effective_mbps": x.EffectiveMbps,
+			"flow_sessions": x.FlowSessions, "flow_packets_tx": x.FlowTXPackets, "flow_bytes_tx": x.FlowTXBytes,
+			"flow_packets_rx": x.FlowRXPackets, "flow_bytes_rx": x.FlowRXBytes, "flow_mbps_offered": x.FlowMbpsOffered,
+			"flow_reassignments": x.FlowReassignments, "flow_untracked": x.FlowUntracked}
+		if x.Provisioning != nil {
+			m["gateway_provisioning"] = x.Provisioning
+		}
 		if !x.CheckedAt.IsZero() {
 			m["checked_at"] = float64(x.CheckedAt.UnixNano()) / 1e9
 		}
@@ -201,7 +214,8 @@ func exitStatusDoc(e client.ExitStatus) map[string]any {
 		servers = append(servers, m)
 	}
 	doc := map[string]any{"active": e.Active.Addr().String(), "primary": e.Primary.Addr().String(), "on_backup": e.Active != e.Primary,
-		"servers": servers, "switches": e.Switches, "silent_ms": e.SilentMS, "searching": e.Probing}
+		"servers": servers, "switches": e.Switches, "silent_ms": e.SilentMS, "searching": e.Probing,
+		"flow_balance": e.FlowBalance, "tracked_flows": e.TrackedFlows, "untracked_flows": e.UntrackedFlows}
 	if !e.LastSwitch.IsZero() {
 		doc["last_switch"], doc["last_reason"] = float64(e.LastSwitch.UnixNano())/1e9, e.LastReason
 	}
@@ -542,11 +556,19 @@ func session(parent context.Context, ready func(), logOut, relayOnly io.Writer) 
 		return l2err
 	}
 	clientMTU := tunnelClientMTU(outerMTU, l2cfg)
-	clientCfg := client.Config{AutoBestExit: cfg.ExitAutoBest == nil || *cfg.ExitAutoBest, Backups: backups, FailoverAfter: time.Duration(cfg.ExitFailoverMS) * time.Millisecond,
+	clientCfg := client.Config{AutoBestExit: cfg.ExitAutoBest == nil || *cfg.ExitAutoBest, Backups: backups, ExitFlowBalance: cfg.ExitFlowBalance,
+		ExitCapacityMbps: cfg.PeerCapacityMbps, BackupCapacitiesMbps: cfg.PeerBackupCapacityMbps,
+		ExitHopCount: cfg.PeerHopCount, BackupHopCounts: cfg.PeerBackupHopCounts, FailoverAfter: time.Duration(cfg.ExitFailoverMS) * time.Millisecond,
 		OnSwitch: func(from, to netip.AddrPort, reason string) {
 			b, _ := json.Marshal(map[string]any{"status": "exit_failover", "from": from.String(), "to": to.String(), "reason": reason})
 			fmt.Println(string(b))
 			sr.NoteSwitch(from, to, reason)
+		}, OnProvisioning: func(p *bond.GatewayProvisioning) {
+			if link := routed.gvisor.Load(); link != nil {
+				if err := link.Configure(p); err != nil {
+					fmt.Fprintln(logOut, "gVisor gateway provisioning rejected:", err)
+				}
+			}
 		}, Key: key, Session: session, Server: peer, Uplinks: specs, Available: available,
 		MTU: clientMTU, Discover: cfg.PathMTU, Failover: cfg.FailoverReplay, FlowPinning: cfg.FlowPinning, StripeAbove: cfg.StripeAbove, CoDel: cfg.CoDel, ParityRowsMin: cfg.ParityRowsMin, ParityRowsMax: cfg.ParityRowsMax,
 		InitialMbps: max(cfg.InitialMbps, 1), MaxMbps: max(cfg.MaxMbps, 100), Deliver: routed.Deliver, Outer: outer, QoS: &qosSettings, LossTracking: cfg.LossTracking, LabMode: cfg.LabMode, DelayControl: cfg.DelayControl}
@@ -554,8 +576,26 @@ func session(parent context.Context, ready func(), logOut, relayOnly io.Writer) 
 	if err != nil {
 		return err
 	}
+	l2dhcp, l2dhcpErr := l2cfg.gvisorDHCP()
+	if l2dhcpErr != nil {
+		return l2dhcpErr
+	}
 	routed.gb = c
 	routed.ready = func() bool { return c.Snapshot().Ready > 0 }
+	clientIP, err := netip.ParseAddr(cfg.ClientTunnelIP)
+	if err != nil {
+		return fmt.Errorf("gVisor gateway link needs a valid client_tunnel_ip: %w", err)
+	}
+	gvisorLink, err := gvisorlink.New(gvisorlink.Options{ClientIP: clientIP, Send: c.Submit, DeliverIP: bridge.Deliver, DHCP: l2dhcp, LANWrite: func(f []byte) {
+		if b := activeL2.Load(); b != nil {
+			b.ToAdapter(f)
+		}
+	}})
+	if err != nil {
+		return fmt.Errorf("create client gVisor gateway link: %w", err)
+	}
+	routed.gvisor.Store(gvisorLink)
+	defer gvisorLink.Close()
 	if sr != nil {
 		sr.run(ctx, sloOpts, routed, c.Snapshot, func() []bond.Alarm {
 			if a := curAlarms.Load(); a != nil {
@@ -577,7 +617,7 @@ func session(parent context.Context, ready func(), logOut, relayOnly io.Writer) 
 	}
 	bridge.Uplink = routed
 	if l2cfg != nil {
-		startL2Bridge(ctx, l2cfg, classifier, routed.Submit, func(m map[string]any) { b, _ := json.Marshal(m); fmt.Println(string(b)) })
+		startL2Bridge(ctx, l2cfg, classifier, routed.Submit, gvisorLink.HandleLANFrame, func(m map[string]any) { b, _ := json.Marshal(m); fmt.Println(string(b)) })
 	}
 	omrStatus := &omrState{mode: serverMode}
 	var meter *linkpolicy.Meter
@@ -751,6 +791,7 @@ func session(parent context.Context, ready func(), logOut, relayOnly io.Writer) 
 			}
 			if *statusPath != "" {
 				doc := statusDocument(cfg, peer, created, s, bridge, omrStatus, lanMgr, localMgr, capture, c.DFEnforced(), alarms)
+				doc["gvisor_link"] = gvisorLink.Status()
 				doc["slo"] = sr.status()
 				doc["reverse_dns"] = rdns.status()
 				doc["error_history"] = errHist.View()
@@ -859,7 +900,7 @@ func statusDocument(cfg fileConfig, peer netip.AddrPort, created time.Time, s cl
 		"versions":  map[string]any{"client": s.ClientVersion, "server": s.ServerVersion, "server_state": s.ServerState},
 		"runtime":   runtimeStats(), "stack_write": b.Out.Timing(),
 		"packets": map[string]any{"outbound": b.Outbound.Load(), "injected": b.Injected.Load(), "dropped": b.Dropped.Load(), "malformed": b.Malformed.Load()},
-		"dish":    dishStatusDoc(), "qos": s.QoS, "link_usage": map[string]any{}, "omr": o.status(), "lan_devices": l.status(), "l2_bridge": l2Status(), "local_networks": localMgr.status(), "device_usage": l.usageStatus(), "lan_access": l.accessStatus(), "alarms": alarms, "loss_causes": lossCauses(s), "exit": exitStatusDoc(s.Exit)}
+		"dish":    dishStatusDoc(), "qos": s.QoS, "gateway_provisioning": s.Provisioning, "link_usage": map[string]any{}, "omr": o.status(), "lan_devices": l.status(), "l2_bridge": l2Status(), "local_networks": localMgr.status(), "device_usage": l.usageStatus(), "lan_access": l.accessStatus(), "alarms": alarms, "loss_causes": lossCauses(s), "exit": exitStatusDoc(s.Exit)}
 	if l != nil && l.hotspot != nil {
 		doc["hotspot"] = l.hotspot.Status(time.Now())
 	}
@@ -891,6 +932,7 @@ func mtuStatus(p bond.PathSnapshot, df []bool) any {
 	sort.Ints(failed)
 	enforced := p.Local >= 0 && p.Local < len(df) && df[p.Local]
 	return map[string]any{"path_mtu": p.MTU.PathMTU, "ceiling": p.MTU.Ceiling, "confirmed": p.MTU.Confirmed, "capable": p.MTU.Capable,
+		"state": p.MTU.State, "probe_count": p.MTU.ProbeCount, "probe_size": p.MTU.ProbeSize,
 		"rounds": p.MTU.Rounds, "acks": p.MTU.Acks, "failed_sizes": failed, "skips": p.MTUSkips, "df_enforced": enforced}
 }
 

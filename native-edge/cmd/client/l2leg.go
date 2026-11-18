@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"sync/atomic"
 	"time"
 
+	"gamebond.local/nativeedge/gvisorlink"
 	"gamebond.local/nativeedge/lan"
 	"github.com/Dankular/GameBond.Core/bond"
 )
@@ -28,6 +31,61 @@ type l2BridgeConfig struct {
 	UnknownUnicastPPS float64           `json:"unknown_unicast_pps"`
 	TunnelVLAN        bond.L2VLANPolicy `json:"tunnel_vlan,omitempty"`
 	LANVLAN           bond.L2VLANPolicy `json:"lan_vlan,omitempty"`
+	// DHCP makes the client's gVisor link answer DHCP for the bridged device (fixed reservations
+	// only) instead of the exit. Omit it to leave DHCP to the exit.
+	DHCP *l2DHCPConfig `json:"dhcp,omitempty"`
+}
+
+// l2DHCPConfig is the "l2_bridge.dhcp" section.
+type l2DHCPConfig struct {
+	Reservations []l2Reservation `json:"reservations"`
+	DNS          []string        `json:"dns,omitempty"`
+	LeaseSeconds int             `json:"lease_seconds,omitempty"`
+}
+
+type l2Reservation struct {
+	MAC  string `json:"mac"`
+	IP   string `json:"ip"`
+	Name string `json:"name,omitempty"`
+}
+
+// gvisorDHCP converts the section into the link's DHCP settings (nil when absent).
+func (c *l2BridgeConfig) gvisorDHCP() (*gvisorlink.DHCPConfig, error) {
+	if c == nil {
+		return nil, nil
+	}
+	if c.DHCP == nil {
+		// No local override: still serve whatever the exit delegates in its provisioning.
+		return &gvisorlink.DHCPConfig{}, nil
+	}
+	out := &gvisorlink.DHCPConfig{LeaseSeconds: c.DHCP.LeaseSeconds}
+	for i, r := range c.DHCP.Reservations {
+		mac, err := net.ParseMAC(r.MAC)
+		if err != nil || len(mac) != 6 {
+			return nil, fmt.Errorf("l2_bridge.dhcp.reservations[%d].mac is not an Ethernet address", i)
+		}
+		ip, err := netip.ParseAddr(r.IP)
+		if err != nil || !ip.Is4() {
+			return nil, fmt.Errorf("l2_bridge.dhcp.reservations[%d].ip is not an IPv4 address", i)
+		}
+		var m [6]byte
+		copy(m[:], mac)
+		out.Reservations = append(out.Reservations, lan.Reservation{MAC: m, IP: ip, Name: r.Name})
+	}
+	for i, d := range c.DHCP.DNS {
+		a, err := netip.ParseAddr(d)
+		if err != nil || !a.Is4() {
+			return nil, fmt.Errorf("l2_bridge.dhcp.dns[%d] is not an IPv4 address", i)
+		}
+		out.DNS = append(out.DNS, a)
+	}
+	if len(out.Reservations) == 0 {
+		return nil, errors.New("l2_bridge.dhcp needs at least one reservation (omit the section to use the exit's delegation)")
+	}
+	if err := out.Validate(); err != nil {
+		return nil, fmt.Errorf("l2_bridge.dhcp: %w", err)
+	}
+	return out, nil
 }
 
 func tunnelClientMTU(outerMTU int, l2cfg *l2BridgeConfig) int {
@@ -78,6 +136,9 @@ func parseL2Bridge(raw json.RawMessage) (*l2BridgeConfig, error) {
 	}
 	if err := c.LANVLAN.Validate(); err != nil {
 		return nil, fmt.Errorf("l2_bridge.lan_vlan: %w", err)
+	}
+	if _, err := c.gvisorDHCP(); err != nil {
+		return nil, err
 	}
 	return &c, nil
 }
@@ -131,7 +192,7 @@ func l2Status() any {
 
 // startL2Bridge keeps the bridged adapter open: an unplugged or failing adapter is retried every
 // five seconds and never stops the tunnel.
-func startL2Bridge(ctx context.Context, c *l2BridgeConfig, classifier *bond.Classifier, submit func(bond.QueuedPacket) bool, out func(map[string]any)) {
+func startL2Bridge(ctx context.Context, c *l2BridgeConfig, classifier *bond.Classifier, submit func(bond.QueuedPacket) bool, local lan.LocalHandler, out func(map[string]any)) {
 	l2Configured.Store(true)
 	go holdPromiscuous(ctx, c.InterfaceID, out)
 	go func() {
@@ -141,6 +202,7 @@ func startL2Bridge(ctx context.Context, c *l2BridgeConfig, classifier *bond.Clas
 				b := lan.NewL2Bridge(lan.L2BridgeConfig{Name: c.Name, FrameMTU: c.FrameMTU, MACLimit: c.MACLimit,
 					TunnelVLAN: c.TunnelVLAN, LANVLAN: c.LANVLAN,
 					BroadcastPPS: c.BroadcastPPS, MulticastPPS: c.MulticastPPS, UnknownUnicastPPS: c.UnknownUnicastPPS}, io, classifier, submit)
+				b.SetLocalHandler(local)
 				activeL2.Store(b)
 				l2LastError.Store("")
 				out(map[string]any{"status": "l2_bridge_up", "name": c.Name})

@@ -4,6 +4,10 @@ go 1.26.11
 
 require golang.org/x/crypto v0.59.0
 
+require golang.org/x/net v0.62.0
+
+require gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c
+
 require (
 	github.com/jchv/go-webview2 v0.0.0-20260205173254-56598839c808
 	golang.org/x/sys v0.50.0
@@ -30,6 +34,6 @@ require (
 )
 
 require (
-	github.com/Dankular/GameBond.Core v0.1.43-0.20261116085028-b90af12681a8
+	github.com/Dankular/GameBond.Core v0.1.43-0.20261118042910-6c28f73eb093
 	modernc.org/sqlite v1.62.0
 )
