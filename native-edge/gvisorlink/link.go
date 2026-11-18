@@ -68,6 +68,8 @@ type Link struct {
 	dhcp       *lan.DHCPServer
 	lan        *channel.Endpoint
 	dhcpEP     tcpip.Endpoint
+	dnsEP      tcpip.Endpoint
+	dnsUpstream []netip.Addr
 	delegation string // the provisioned client hosts and DNS the current DHCP server was built from
 	lanWrite   func([]byte)
 	lanAddr    tcpip.Address
@@ -211,7 +213,7 @@ func (l *Link) Configure(p *bond.GatewayProvisioning) error {
 	if l.active && l.clientAddr == client && l.exitAddr == exit && l.mtu == p.Link.MTU && slices.Equal(l.routes, p.Routes) && l.delegation == delegation {
 		return nil
 	}
-	dhcpServer, err := buildDHCP(l.dhcpCfg, p, client, exit)
+	dhcpServer, upstream, hosts, err := buildDHCP(l.dhcpCfg, p, client, exit)
 	if err != nil {
 		return err
 	}
@@ -243,6 +245,13 @@ func (l *Link) Configure(p *bond.GatewayProvisioning) error {
 		}
 		routeTable = append(routeTable, tcpip.Route{Destination: subnet, Gateway: tcpip.AddrFrom4(exit.As4()), NIC: bondNIC})
 	}
+	// Replies to the bridged devices (DNS) leave through the virtual LAN NIC, not toward the exit.
+	for _, h := range hosts {
+		host, hostErr := tcpip.NewSubnet(tcpip.AddrFrom4(h.As4()), appMask)
+		if hostErr == nil {
+			routeTable = append(routeTable, tcpip.Route{Destination: host, NIC: lanNIC})
+		}
+	}
 	routeTable = append(routeTable, tcpip.Route{Destination: header.IPv4EmptySubnet, Gateway: tcpip.AddrFrom4(exit.As4()), NIC: bondNIC})
 	if dhcpServer != nil {
 		if err := l.addLANAddress(protocolAddress); err != nil {
@@ -253,7 +262,7 @@ func (l *Link) Configure(p *bond.GatewayProvisioning) error {
 	l.stack.SetRouteTable(routeTable)
 	l.bond.SetMTU(uint32(p.Link.MTU))
 	l.clientAddr, l.exitAddr, l.mtu, l.active = client, exit, p.Link.MTU, true
-	l.dhcp, l.delegation = dhcpServer, delegation
+	l.dhcp, l.delegation, l.dnsUpstream = dhcpServer, delegation, upstream
 	l.routes = append(l.routes[:0], p.Routes...)
 	return nil
 }

@@ -128,7 +128,7 @@ func TestFixedReservationOfferAndAckThroughGVisor(t *testing.T) {
 	ip, opts := dhcpOptions(reply)
 	want := netip.MustParseAddr("10.77.0.50")
 	if ip != want || opts[53][0] != 2 || !bytes.Equal(opts[54], []byte{10, 77, 0, 2}) || !bytes.Equal(opts[3], []byte{10, 77, 0, 1}) ||
-		!bytes.Equal(opts[1], []byte{255, 255, 255, 0}) || !bytes.Equal(opts[6], []byte{1, 1, 1, 1}) {
+		!bytes.Equal(opts[1], []byte{255, 255, 255, 0}) || !bytes.Equal(opts[6], []byte{10, 77, 0, 2}) {
 		t.Fatalf("bad OFFER %v %v", ip, opts)
 	}
 	if !bytes.Equal(opts[26], []byte{0x05, 0x78}) || !bytes.Equal(opts[28], []byte{10, 77, 0, 255}) || !bytes.Equal(opts[51], []byte{0, 0, 2, 0x58}) ||
@@ -236,7 +236,7 @@ func TestProvisionedHostsDriveDHCPAndAnEmptyProvisioningLeavesItToTheExit(t *tes
 		t.Fatal("no OFFER for a delegated host")
 	}
 	ip, opts := dhcpOptions(reply)
-	if ip != netip.MustParseAddr("10.77.0.50") || !bytes.Equal(opts[6], []byte{9, 9, 9, 9}) {
+	if ip != netip.MustParseAddr("10.77.0.50") || !bytes.Equal(opts[6], []byte{10, 77, 0, 2}) {
 		t.Fatalf("OFFER ignored the provisioned host or DNS: %v %v", ip, opts)
 	}
 	p.Revision, p.ClientHosts, p.ClientDNS = 3, nil, nil

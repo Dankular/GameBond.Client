@@ -12,7 +12,6 @@ import (
 
 	"gamebond.local/nativeedge/lan"
 	"github.com/Dankular/GameBond.Core/bond"
-	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/link/ethernet"
@@ -62,9 +61,12 @@ func (c DHCPConfig) Validate() error {
 // buildDHCP creates the server for the current provisioning. The exit address is the router
 // option; the client's own bond address is the server identifier, because that is the address the
 // virtual LAN NIC owns.
-func buildDHCP(c *DHCPConfig, p *bond.GatewayProvisioning, client netip.Prefix, exit netip.Addr) (*lan.DHCPServer, error) {
+// The lease names the client itself as the DNS server (the link answers it, see dns.go); the
+// configured or provisioned servers become the upstream resolvers it forwards to. The hosts are the
+// reserved device addresses, which need a route out of the virtual LAN NIC.
+func buildDHCP(c *DHCPConfig, p *bond.GatewayProvisioning, client netip.Prefix, exit netip.Addr) (server *lan.DHCPServer, upstream, hosts []netip.Addr, err error) {
 	if c == nil {
-		return nil, nil
+		return nil, nil, nil, nil
 	}
 	reservations, dns := c.Reservations, c.DNS
 	if len(p.ClientHosts) > 0 { // the exit is the source of truth
@@ -73,7 +75,7 @@ func buildDHCP(c *DHCPConfig, p *bond.GatewayProvisioning, client netip.Prefix, 
 			mac, err := net.ParseMAC(h.MAC)
 			ip, ipErr := netip.ParseAddr(h.IP)
 			if err != nil || len(mac) != 6 || ipErr != nil {
-				return nil, fmt.Errorf("gvisorlink: provisioned DHCP host %q is malformed", h.Name)
+				return nil, nil, nil, fmt.Errorf("gvisorlink: provisioned DHCP host %q is malformed", h.Name)
 			}
 			reservations = append(reservations, lan.Reservation{MAC: [6]byte(mac), IP: ip, Name: h.Name})
 		}
@@ -81,20 +83,20 @@ func buildDHCP(c *DHCPConfig, p *bond.GatewayProvisioning, client netip.Prefix, 
 			for _, d := range p.ClientDNS {
 				a, err := netip.ParseAddr(d)
 				if err != nil {
-					return nil, fmt.Errorf("gvisorlink: provisioned DNS server %q is malformed", d)
+					return nil, nil, nil, fmt.Errorf("gvisorlink: provisioned DNS server %q is malformed", d)
 				}
 				dns = append(dns, a)
 			}
 		}
 	}
 	if len(reservations) == 0 {
-		return nil, nil // nothing delegated: the exit's own DHCP keeps answering
+		return nil, nil, nil, nil // nothing delegated: the exit's own DHCP keeps answering
 	}
 	subnet := client.Masked()
 	var start, end netip.Addr
 	for _, r := range reservations {
 		if !subnet.Contains(r.IP) || r.IP == exit || r.IP == client.Addr() || r.IP == subnet.Addr() {
-			return nil, fmt.Errorf("gvisorlink: DHCP reservation %s is not a usable host address in %s", r.IP, subnet)
+			return nil, nil, nil, fmt.Errorf("gvisorlink: DHCP reservation %s is not a usable host address in %s", r.IP, subnet)
 		}
 		if !start.IsValid() || r.IP.Less(start) {
 			start = r.IP
@@ -108,8 +110,12 @@ func buildDHCP(c *DHCPConfig, p *bond.GatewayProvisioning, client netip.Prefix, 
 		lease = 3600
 	}
 	network := lan.NetworkConfig{Name: "bond-lan", Prefix: netip.PrefixFrom(exit, client.Bits()), ServerID: client.Addr(), MTU: int(p.Link.MTU),
-		DHCP: &lan.DHCPPoolConfig{Start: start, End: end, LeaseSeconds: lease, DNS: dns, Reservations: reservations}}
-	return lan.NewDHCPServer(network, [6]byte(lanMACBytes), nil, time.Now)
+		DHCP: &lan.DHCPPoolConfig{Start: start, End: end, LeaseSeconds: lease, DNS: []netip.Addr{client.Addr()}, Reservations: reservations}}
+	server, err = lan.NewDHCPServer(network, [6]byte(lanMACBytes), nil, time.Now)
+	for _, r := range reservations {
+		hosts = append(hosts, r.IP)
+	}
+	return server, dns, hosts, err
 }
 
 // startDHCP creates the virtual LAN NIC and the UDP port 67 endpoint on the link's gVisor stack.
@@ -146,7 +152,7 @@ func (l *Link) startDHCP(ctx context.Context, write func([]byte)) error {
 		l.serveDHCP(ctx, ep, ready)
 	}()
 	go l.pumpLAN(ctx)
-	return nil
+	return l.startDNS(ctx)
 }
 
 func (l *Link) addLANAddress(address tcpip.ProtocolAddress) error {
@@ -221,8 +227,16 @@ func (l *Link) pumpLAN(ctx context.Context) {
 func (l *Link) HandleLANFrame(frame []byte) ([]byte, bool) {
 	l.mu.Lock()
 	serving := l.dhcp != nil && l.lan != nil
+	client := l.clientAddr.Addr()
 	l.mu.Unlock()
-	if !serving || len(frame) < 14+20+8+240 || binary.BigEndian.Uint16(frame[12:14]) != 0x0800 {
+	if !serving {
+		return nil, false
+	}
+	if client.IsValid() && (dnsFrame(frame, client) || arpForClient(frame, client)) {
+		l.injectLAN(frame)
+		return nil, true
+	}
+	if len(frame) < 14+20+8+240 || binary.BigEndian.Uint16(frame[12:14]) != 0x0800 {
 		return nil, false
 	}
 	ip := frame[14:]
@@ -237,8 +251,6 @@ func (l *Link) HandleLANFrame(frame []byte) ([]byte, bool) {
 	if !bytes.Equal(udpHeader[8+28:8+34], frame[6:12]) {
 		return nil, true // chaddr must equal the Ethernet source: drop a spoofed request
 	}
-	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(append([]byte(nil), frame...))})
-	l.lan.InjectInbound(0, pkt)
-	pkt.DecRef()
+	l.injectLAN(frame)
 	return nil, true
 }
