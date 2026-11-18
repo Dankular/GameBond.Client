@@ -79,8 +79,8 @@ func (c *l2BridgeConfig) gvisorDHCP() (*gvisorlink.DHCPConfig, error) {
 		}
 		out.DNS = append(out.DNS, a)
 	}
-	if len(out.Reservations) == 0 {
-		return nil, errors.New("l2_bridge.dhcp needs at least one reservation (omit the section to use the exit's delegation)")
+	if len(out.Reservations) == 0 && len(out.DNS) == 0 {
+		return nil, errors.New("l2_bridge.dhcp needs a reservation or a dns server (omit the section to use the exit's delegation)")
 	}
 	if err := out.Validate(); err != nil {
 		return nil, fmt.Errorf("l2_bridge.dhcp: %w", err)
@@ -212,7 +212,8 @@ func startL2Bridge(ctx context.Context, c *l2BridgeConfig, classifier *bond.Clas
 				runCtx, stopRun := context.WithCancel(ctx)
 				// A tap that has delivered nothing for 15 s while the link is up is deaf (the driver can lose
 				// its binding on a client restart); reopen it, at most every 15 s. A quiet segment still
-				// carries ARP and DHCP chatter, so silence is a fault, not idleness.
+				// carries ARP and DHCP chatter, so silence is a fault, not idleness. This must not depend on
+				// promiscuous mode: an unelevated client cannot enable it, and would then keep a deaf tap forever.
 				go func() {
 					tick := time.NewTicker(5 * time.Second)
 					defer tick.Stop()
@@ -224,7 +225,7 @@ func startL2Bridge(ctx context.Context, c *l2BridgeConfig, classifier *bond.Clas
 						case <-tick.C:
 							if n := b.FramesRead(); n != lastRead {
 								lastRead, since = n, time.Now()
-							} else if time.Since(since) >= 15*time.Second && l2Promiscuous.Load() {
+							} else if time.Since(since) >= 15*time.Second {
 								out(map[string]any{"status": "l2_bridge_reopen", "name": c.Name, "reason": "no frames read for 15 s"})
 								stopRun()
 								return

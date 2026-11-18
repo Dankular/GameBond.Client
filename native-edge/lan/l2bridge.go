@@ -1,6 +1,7 @@
 package lan
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sync"
@@ -45,6 +46,7 @@ type L2Bridge struct {
 	read                             atomic.Uint64
 	local                            atomic.Pointer[LocalHandler]
 	localHandled                     atomic.Uint64
+	echoDrops                        atomic.Uint64
 }
 
 // LocalHandler answers a frame the device sent without forwarding it to the bond. It returns the
@@ -213,6 +215,15 @@ func (b *L2Bridge) Deliver(payload []byte) bool {
 		b.trace.note("drop-oversize-down", frame)
 		return true
 	}
+	// The segment reflects a bridged device's broadcasts back to us with the device's own source
+	// MAC. Letting the switch see that makes the MAC "move" to the tunnel port, which it reads as a
+	// loop and blocks the tunnel port for 30 s: ARP never completes. A MAC that lives on the LAN
+	// can never legitimately arrive from the bond, so drop the echo before it reaches the switch.
+	if len(frame) >= 12 && b.learnedOnLAN(frame[6:12]) {
+		b.echoDrops.Add(1)
+		b.trace.note("down-drop-echo", frame)
+		return true
+	}
 	v := b.sw.Forward(L2PortTunnel, frame, b.now())
 	if v.Drop != bond.L2Forward {
 		b.switchDrops.Add(1)
@@ -244,6 +255,15 @@ func (b *L2Bridge) Deliver(payload []byte) bool {
 		b.trace.note("down", frame)
 	}
 	return true
+}
+
+func (b *L2Bridge) learnedOnLAN(mac []byte) bool {
+	for _, e := range b.sw.FDBEntries() {
+		if e.Port == L2PortLAN && bytes.Equal(e.MAC[:], mac) {
+			return true
+		}
+	}
+	return false
 }
 
 // FramesRead is how many frames the adapter has delivered to the bridge since it opened.
@@ -279,7 +299,7 @@ func (b *L2Bridge) Stats() map[string]any {
 	st := b.sw.Stats()
 	m := map[string]any{
 		"name": b.cfg.Name, "to_tunnel": b.toTunnel.Load(), "from_tunnel": b.fromTunnel.Load(),
-		"oversize": b.oversize.Load(), "queue_full": b.queueFull.Load(), "switch_drops": b.switchDrops.Load(), "write_errors": b.writeErr.Load(), "local_handled": b.localHandled.Load(),
+		"oversize": b.oversize.Load(), "queue_full": b.queueFull.Load(), "switch_drops": b.switchDrops.Load(), "write_errors": b.writeErr.Load(), "local_handled": b.localHandled.Load(), "echo_drops": b.echoDrops.Load(),
 		"fdb_size": st.FDBSize, "learned": st.Learned, "moves": st.Moves, "aged": st.Aged, "flooded": st.Flooded, "forwarded": st.Forwarded,
 		"drop_storm": st.DropStorm, "drop_mac_limit": st.DropMACLimit, "drop_blocked": st.DropBlocked, "drop_isolated": st.DropIsolated,
 		"drop_other": st.DropOther, "drop_bpdu_guard": st.DropBPDUGuard, "drop_vlan": st.DropVLAN, "drop_ra_guard": st.DropRAGuard,
