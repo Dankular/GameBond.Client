@@ -127,12 +127,21 @@ func dnsFrame(frame []byte, client netip.Addr) bool {
 	return binary.BigEndian.Uint16(ip[headerLen+2:]) == 53 && bytes.Equal(ip[16:20], client.AsSlice())
 }
 
-// arpForClient reports whether frame is an ARP request for the client's address: the device asking
-// where its DNS server is. The virtual LAN NIC answers it, so the query that follows is addressed
-// to the NIC's MAC.
+// arpForClient reports whether frame is ARP the virtual LAN NIC must see: a request for the client's
+// address (the device looking for its DNS server), or any reply addressed to the NIC (the device
+// answering the NIC's own request for its MAC, without which a reply to it can never be sent once
+// the neighbour entry expires).
 func arpForClient(frame []byte, client netip.Addr) bool {
-	return len(frame) >= 42 && binary.BigEndian.Uint16(frame[12:14]) == 0x0806 && binary.BigEndian.Uint16(frame[20:22]) == 1 &&
-		bytes.Equal(frame[38:42], client.AsSlice())
+	if len(frame) < 42 || binary.BigEndian.Uint16(frame[12:14]) != 0x0806 {
+		return false
+	}
+	switch binary.BigEndian.Uint16(frame[20:22]) {
+	case 1:
+		return bytes.Equal(frame[38:42], client.AsSlice())
+	case 2:
+		return bytes.Equal(frame[0:6], lanMACBytes)
+	}
+	return false
 }
 
 func (l *Link) injectLAN(frame []byte) {

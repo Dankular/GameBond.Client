@@ -60,6 +60,14 @@ func TestClientAnswersDNSForTheBridgedDevice(t *testing.T) {
 	if !consumed || reply == nil || binary.BigEndian.Uint16(reply[12:14]) != 0x0806 || !bytes.Equal(reply[6:12], lanMACBytes) || reply[21] != 2 {
 		t.Fatalf("the virtual LAN NIC must answer ARP for the client address: consumed=%v % x", consumed, reply)
 	}
+	// The neighbour entry the stack made from that request expires; the NIC then asks for the device's MAC
+	// and the device's unicast ARP reply must reach the stack too.
+	arpReply := append(append([]byte(nil), lanMACBytes...), ps5MAC[:]...)
+	arpReply = append(arpReply, 0x08, 0x06, 0, 1, 8, 0, 6, 4, 0, 2)
+	arpReply = append(append(append(arpReply, ps5MAC[:]...), device.AsSlice()...), append(append([]byte(nil), lanMACBytes...), client.AsSlice()...)...)
+	if _, consumed := l.HandleLANFrame(arpReply); !consumed {
+		t.Fatal("an ARP reply addressed to the virtual LAN NIC must be consumed by the stack")
+	}
 	reply, consumed = l.exchange(t, dnsQuery(ps5MAC, device, client, 0x1234))
 	if !consumed {
 		t.Fatal("the DNS query was not consumed by the stack")

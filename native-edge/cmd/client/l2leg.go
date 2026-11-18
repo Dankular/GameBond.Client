@@ -190,6 +190,18 @@ func l2Status() any {
 	return st
 }
 
+// deafTapAfter is how long a tap may stay silent before it is reopened. A tap that has never
+// delivered a frame since it opened is the deaf-after-restart case and is reopened quickly. One that
+// has been delivering is merely on a quiet segment (a PS5 idling on a menu sends less than a frame
+// every 15 s), and reopening it is itself disruptive: it takes the packet driver out of tunnel mode,
+// the USB adapter's link bounces, and every device behind it loses its connection.
+func deafTapAfter(framesRead uint64) time.Duration {
+	if framesRead == 0 {
+		return 15 * time.Second
+	}
+	return 3 * time.Minute
+}
+
 // startL2Bridge keeps the bridged adapter open: an unplugged or failing adapter is retried every
 // five seconds and never stops the tunnel.
 func startL2Bridge(ctx context.Context, c *l2BridgeConfig, classifier *bond.Classifier, submit func(bond.QueuedPacket) bool, local lan.LocalHandler, out func(map[string]any)) {
@@ -225,7 +237,7 @@ func startL2Bridge(ctx context.Context, c *l2BridgeConfig, classifier *bond.Clas
 						case <-tick.C:
 							if n := b.FramesRead(); n != lastRead {
 								lastRead, since = n, time.Now()
-							} else if time.Since(since) >= 15*time.Second {
+							} else if time.Since(since) >= deafTapAfter(n) {
 								out(map[string]any{"status": "l2_bridge_reopen", "name": c.Name, "reason": "no frames read for 15 s"})
 								stopRun()
 								return
